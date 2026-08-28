@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+sqlalchemy
+pillow
+instagrapi
+instaloader
+openai
+google-generativeai
+anthropic
+requests
+python-multipart
+pydantic
+imageio-ffmpeg
+moviepy>=2.0.0
+openai-whisper
+yt-dlp
+

@@ -1,0 +1,17 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+build/
+dist/
+*.log
+*.mp4
+*.mkv
+*.mov
+downloads/
+uploads/
+avatars/
+database.db
+.git/
+.gitignore

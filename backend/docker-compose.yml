@@ -1,0 +1,23 @@
+services:
+  viraldog-cloud:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: viraldog-cloud
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - VIRALDOG_API_KEY=${VIRALDOG_API_KEY:-viraldog_secret_key_123}
+      - PYTHONUNBUFFERED=1
+      - DATABASE_PATH=/app/data/database.db
+      - TZ=${TZ:-America/Sao_Paulo}
+    volumes:
+      - viraldog_data:/app/data
+      - viraldog_uploads:/app/uploads
+      - viraldog_avatars:/app/avatars
+
+volumes:
+  viraldog_data:
+  viraldog_uploads:
+  viraldog_avatars:

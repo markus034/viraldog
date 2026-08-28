@@ -1,0 +1,6 @@
+{
+  "name": "Autodark Grid Studio",
+  "description": "Edite vídeos verticais em lote removendo molduras velhas e aplicando novos templates de forma automatizada por detecção temporal de variância.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

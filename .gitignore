@@ -1,0 +1,59 @@
+# Dependencies
+node_modules/
+*/node_modules/
+**/node_modules/
+venv/
+*/venv/
+.venv/
+*/.venv/
+
+# Build artifacts
+dist/
+*/dist/
+**/dist/
+build/
+*/build/
+**/build/
+.next/
+*/.next/
+**/.next/
+out/
+*/out/
+**/out/
+dist_release/
+
+# Database & local data
+*.db
+*.sqlite
+*.sqlite3
+downloads/
+*/downloads/
+uploads/
+*/uploads/
+scratch/
+
+# Temporary & Media test files
+*.mp4
+*.tar.gz
+__pycache__/
+*/__pycache__/
+**/__pycache__/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+.vercel/
+*/.vercel/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# System files
+.DS_Store
+Thumbs.db
+.wrangler/
+*/.wrangler/
