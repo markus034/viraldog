@@ -556,17 +556,43 @@ export default function BulkScheduleModal({ isOpen, onClose, accounts, triggerTo
                   value={selectedAccount}
                   onChange={setSelectedAccount}
                   options={accounts.map(acc => {
-                    const isOfficial = acc.has_official_token;
+                    const isOfficial = acc.has_official_token || acc.auth_mode === 'official';
+                    const isRevoked = Boolean(acc.revoked);
                     const name = acc.display_name || acc.username;
+                    let label = `@${name}`;
+                    if (isRevoked) label = `@${name} (⚠️ Desautorizada na Meta)`;
+                    else if (isOfficial) label = `@${name} (✓ Meta Oficial)`;
                     return {
                       value: acc.username,
-                      label: isOfficial ? `@${name} (🛡️ Oficial)` : `@${name}`,
+                      label: label,
                       avatar: acc.avatar_url ? (acc.avatar_url.startsWith('http') ? acc.avatar_url : `${API}${acc.avatar_url}`) : null,
                       username: acc.username
                     };
                   })}
                   placeholder="Selecione uma conta"
                 />
+                {(() => {
+                  const currentAcc = accounts.find(a => a.username === selectedAccount);
+                  if (!currentAcc) return null;
+                  const isOfficial = currentAcc.has_official_token || currentAcc.auth_mode === 'official';
+                  if (currentAcc.revoked) {
+                    return (
+                      <p className="text-[11px] font-semibold text-rose-600 flex items-center gap-1">
+                        <span className="material-symbols-outlined text-[14px]">warning</span>
+                        Esta conta foi desautorizada na Meta. Por favor, reconecte na aba Perfis.
+                      </p>
+                    );
+                  }
+                  if (isOfficial) {
+                    return (
+                      <p className="text-[11px] font-semibold text-emerald-600 flex items-center gap-1">
+                        <span className="material-symbols-outlined text-[14px]">verified</span>
+                        Conta Oficial da Meta pronta para publicação via API.
+                      </p>
+                    );
+                  }
+                  return null;
+                })()}
               </div>
 
               {/* Folder Selector / Dropzone */}

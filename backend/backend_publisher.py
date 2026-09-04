@@ -224,214 +224,164 @@ def suggest_best_time(db: Session, account_username: str = None) -> dict:
     }
 
 
-# ─── Official Instagram Graph API Publishing ───
+# ─── Official Instagram Graph API Publishing (v22.0) ───
 
-def _resolve_media_url(file_path: str, public_base_url: str = "") -> str:
-    """Helper to convert local file path to accessible public URL or keep existing URL."""
-    if not file_path:
-        return ""
-    if file_path.startswith("http://") or file_path.startswith("https://"):
-        return file_path
-    
-    base = public_base_url.rstrip("/") if public_base_url else "http://localhost:8000"
-    filename = os.path.basename(file_path)
-    return f"{base}/uploads/{filename}"
+def check_24h_post_limit(db: Session, ig_user_id: str = None, account_username: str = None) -> bool:
+    """
+    Checks if account has reached Meta's 100 posts per 24-hour rolling window limit.
+    Returns True if allowed to publish, False if limit reached.
+    """
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    query = db.query(Post).filter(
+        Post.status == "posted",
+        (Post.published_at >= cutoff) | ((Post.published_at == None) & (Post.created_at >= cutoff))
+    )
+    if ig_user_id:
+        query = query.filter(Post.ig_user_id == str(ig_user_id))
+    elif account_username:
+        query = query.filter(Post.account_username == account_username)
+    else:
+        return True
+    count = query.count()
+    print(f"[Meta RateLimit] Publicações da conta {account_username or ig_user_id} nas últimas 24h: {count}/100")
+    return count < 100
 
 
 def publish_via_official_api(video_path: str, caption: str, access_token: str, ig_user_id: str,
                              post_type: str = "reel", carousel_images: list = None,
-                             public_base_url: str = "") -> str:
+                             db: Session = None) -> str:
     """
-    Publishes content via official Instagram Graph API (Instagram Login / Content Publishing API).
-    Supports Reels, Single Images, and Carousels.
+    Publishes content via official Meta Instagram Graph API v22.0.
+    Uploads local media to Cloud Storage (S3/R2) or public server, creates container,
+    waits for FINISHED status, and executes media_publish.
     """
+    import cloud_storage
     if not access_token or not ig_user_id:
         raise ValueError("Token de acesso ou ID da conta do Instagram não informado.")
 
-    base_url = f"https://graph.facebook.com/v19.0/{ig_user_id}/media"
+    base_url = f"https://graph.facebook.com/v22.0/{ig_user_id}/media"
+    uploaded_keys_to_clean = []
 
-    # 1. Carrossel
-    if post_type == "carousel" and carousel_images and len(carousel_images) > 0:
-        child_ids = []
-        for img_item in carousel_images:
-            item_url = _resolve_media_url(img_item, public_base_url)
-            is_video = img_item.lower().endswith(('.mp4', '.mov', '.avi'))
-            child_payload = {
+    try:
+        # 1. Carrossel
+        if post_type == "carousel" and carousel_images and len(carousel_images) > 0:
+            child_ids = []
+            for item_path in carousel_images:
+                item_url, s3_key = cloud_storage.upload_media_for_meta(item_path, db=db)
+                if s3_key:
+                    uploaded_keys_to_clean.append(s3_key)
+
+                is_video = item_path.lower().endswith(('.mp4', '.mov', '.avi'))
+                child_payload = {
+                    "access_token": access_token,
+                    "is_carousel_item": "true",
+                }
+                if is_video:
+                    child_payload["media_type"] = "VIDEO"
+                    child_payload["video_url"] = item_url
+                else:
+                    child_payload["image_url"] = item_url
+
+                c_res = requests.post(base_url, data=child_payload, timeout=30)
+                if c_res.status_code != 200:
+                    raise Exception(f"Erro ao criar item de carrossel na Meta API: {c_res.text}")
+                child_id = c_res.json().get("id")
+                if child_id:
+                    child_ids.append(child_id)
+
+            parent_payload = {
+                "caption": caption or "",
+                "media_type": "CAROUSEL",
+                "children": ",".join(child_ids),
                 "access_token": access_token,
-                "is_carousel_item": "true",
             }
-            if is_video:
-                child_payload["media_type"] = "VIDEO"
-                child_payload["video_url"] = item_url
-            else:
-                child_payload["image_url"] = item_url
+            res = requests.post(base_url, data=parent_payload, timeout=30)
+            if res.status_code != 200:
+                raise Exception(f"Erro ao criar container de carrossel na Meta API: {res.text}")
+            container_id = res.json().get("id")
 
-            c_res = requests.post(base_url, data=child_payload, timeout=30)
-            if c_res.status_code != 200:
-                raise Exception(f"Erro ao criar item do carrossel na Meta API: {c_res.text}")
-            child_id = c_res.json().get("id")
-            if child_id:
-                child_ids.append(child_id)
+        # 2. Imagem Única
+        elif post_type in ["image", "photo"] or (video_path and video_path.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))):
+            image_url, s3_key = cloud_storage.upload_media_for_meta(video_path, db=db)
+            if s3_key:
+                uploaded_keys_to_clean.append(s3_key)
 
-        # Criar container pai do carrossel
-        parent_payload = {
-            "caption": caption,
-            "media_type": "CAROUSEL",
-            "children": ",".join(child_ids),
-            "access_token": access_token,
-        }
-        res = requests.post(base_url, data=parent_payload, timeout=30)
-        if res.status_code != 200:
-            raise Exception(f"Erro ao criar container de carrossel na Meta API: {res.text}")
-        container_id = res.json().get("id")
+            payload = {
+                "caption": caption or "",
+                "image_url": image_url,
+                "access_token": access_token,
+            }
+            res = requests.post(base_url, data=payload, timeout=30)
+            if res.status_code != 200:
+                raise Exception(f"Erro ao criar container de foto na Meta API: {res.text}")
+            container_id = res.json().get("id")
 
-    # 2. Imagem Única
-    elif post_type in ["image", "photo"] or (video_path and video_path.lower().endswith(('.jpg', '.jpeg', '.png', '.webp'))):
-        image_url = _resolve_media_url(video_path, public_base_url)
-        payload = {
-            "caption": caption,
-            "image_url": image_url,
-            "access_token": access_token,
-        }
-        res = requests.post(base_url, data=payload, timeout=30)
-        if res.status_code != 200:
-            raise Exception(f"Erro ao criar container de imagem na Meta API: {res.text}")
-        container_id = res.json().get("id")
-
-    # 3. Reels / Vídeo
-    else:
-        video_url = _resolve_media_url(video_path, public_base_url)
-        payload = {
-            "caption": caption,
-            "media_type": "REELS",
-            "video_url": video_url,
-            "access_token": access_token,
-        }
-        res = requests.post(base_url, data=payload, timeout=30)
-        if res.status_code != 200:
-            raise Exception(f"Erro ao criar container de Reel na Meta API: {res.text}")
-        container_id = res.json().get("id")
-
-    if not container_id:
-        raise Exception("Container ID não retornado pela API do Instagram.")
-
-    # 4. Aguardar processamento do container pela Meta
-    check_url = f"https://graph.facebook.com/v19.0/{container_id}"
-    for attempt in range(40):
-        time.sleep(3)
-        check_res = requests.get(check_url, params={"fields": "status_code,status", "access_token": access_token}, timeout=10)
-        if check_res.status_code == 200:
-            status_data = check_res.json()
-            status_code = status_data.get("status_code")
-            if status_code == "FINISHED":
-                break
-            elif status_code == "ERROR":
-                error_msg = status_data.get("status", "Erro desconhecido")
-                raise Exception(f"Falha no processamento da mídia pela API da Meta: {error_msg}")
-
-    # 5. Publicar o Container
-    publish_url = f"https://graph.facebook.com/v19.0/{ig_user_id}/media_publish"
-    pub_res = requests.post(publish_url, data={"creation_id": container_id, "access_token": access_token}, timeout=30)
-    if pub_res.status_code != 200:
-        raise Exception(f"Erro ao publicar container na API Oficial da Meta: {pub_res.text}")
-
-    return pub_res.json().get("id", container_id)
-
-
-# ─── Funções Oficiais de Agendamento Meta Graph API (v21.0) ───
-
-def agendar_post_imagem(token: str, insta_id: str, url_imagem: str, legenda: str, data_agendamento: datetime) -> dict:
-    """
-    Agenda uma foto única no Feed.
-    data_agendamento: datetime (mínimo 15 min, máximo 75 dias no futuro)
-    """
-    timestamp = int(data_agendamento.timestamp())
-    url = f"https://graph.facebook.com/v21.0/{insta_id}/media"
-    
-    payload = {
-        "image_url": url_imagem,
-        "caption": legenda or "",
-        "scheduled_publish_time": timestamp,
-        "access_token": token
-    }
-    
-    res = requests.post(url, data=payload, timeout=30)
-    data = res.json()
-    if res.status_code != 200 or "id" not in data:
-        error_msg = data.get("error", {}).get("message") or res.text
-        raise Exception(f"Erro na Meta API ao agendar imagem: {error_msg}")
-    return data
-
-
-def agendar_reels(token: str, insta_id: str, url_video: str, legenda: str, data_agendamento: datetime) -> dict:
-    """
-    Agenda um vídeo no formato Reels.
-    """
-    timestamp = int(data_agendamento.timestamp())
-    url = f"https://graph.facebook.com/v21.0/{insta_id}/media"
-    
-    payload = {
-        "media_type": "REELS",
-        "video_url": url_video,
-        "caption": legenda or "",
-        "share_to_feed": True,
-        "scheduled_publish_time": timestamp,
-        "access_token": token
-    }
-    
-    res = requests.post(url, data=payload, timeout=30)
-    data = res.json()
-    if res.status_code != 200 or "id" not in data:
-        error_msg = data.get("error", {}).get("message") or res.text
-        raise Exception(f"Erro na Meta API ao agendar Reels: {error_msg}")
-    return data
-
-
-def agendar_carrossel(token: str, insta_id: str, lista_urls_imagens: list, legenda: str, data_agendamento: datetime) -> dict:
-    """
-    Agenda um carrossel de 2 a 10 imagens.
-    """
-    if len(lista_urls_imagens) < 2:
-        raise ValueError("O carrossel precisa de no mínimo 2 imagens.")
-    if len(lista_urls_imagens) > 10:
-        raise ValueError("O carrossel suporta no máximo 10 imagens.")
-
-    ids_filhos = []
-    url_base = f"https://graph.facebook.com/v21.0/{insta_id}/media"
-    
-    # Passo 1: Criar o contêiner individual de cada imagem
-    for url_img in lista_urls_imagens:
-        payload_filho = {
-            "image_url": url_img,
-            "is_carousel_item": True,
-            "access_token": token
-        }
-        res_filho = requests.post(url_base, data=payload_filho, timeout=30).json()
-        if "id" in res_filho:
-            ids_filhos.append(res_filho["id"])
+        # 3. Reels / Vídeo
         else:
-            error_msg = res_filho.get("error", {}).get("message") or str(res_filho)
-            raise Exception(f"Erro ao criar item do carrossel: {error_msg}")
-            
-    # Passo 2: Criar o contêiner Pai com a legenda e o scheduled_publish_time
-    timestamp = int(data_agendamento.timestamp())
-    payload_pai = {
-        "media_type": "CAROUSEL",
-        "children": ",".join(ids_filhos),
-        "caption": legenda or "",
-        "scheduled_publish_time": timestamp,
-        "access_token": token
-    }
-    
-    res_pai = requests.post(url_base, data=payload_pai, timeout=30).json()
-    if "id" in res_pai:
-        return res_pai
-    else:
-        error_msg = res_pai.get("error", {}).get("message") or str(res_pai)
-        raise Exception(f"Erro ao criar carrossel: {error_msg}")
+            video_url, s3_key = cloud_storage.upload_media_for_meta(video_path, db=db)
+            if s3_key:
+                uploaded_keys_to_clean.append(s3_key)
 
+            payload = {
+                "caption": caption or "",
+                "media_type": "REELS",
+                "video_url": video_url,
+                "share_to_feed": "true",
+                "access_token": access_token,
+            }
+            res = requests.post(base_url, data=payload, timeout=30)
+            if res.status_code != 200:
+                raise Exception(f"Erro ao criar container de Reels na Meta API: {res.text}")
+            container_id = res.json().get("id")
 
-from database import Config, Post, PostAnalytics, Account, AccountProfile
+        if not container_id:
+            raise Exception("Container ID não retornado pela API da Meta.")
+
+        # 4. Polling do status do container até FINISHED
+        check_url = f"https://graph.facebook.com/v22.0/{container_id}"
+        print(f"[Meta API] Aguardando processamento do container {container_id}...")
+        status_ok = False
+        for attempt in range(40):  # 40 * 3s = 120s timeout
+            time.sleep(3)
+            check_res = requests.get(
+                check_url,
+                params={"fields": "status_code,status", "access_token": access_token},
+                timeout=12
+            )
+            if check_res.status_code == 200:
+                sdata = check_res.json()
+                code = sdata.get("status_code")
+                if code == "FINISHED":
+                    status_ok = True
+                    break
+                elif code == "ERROR":
+                    err_detail = sdata.get("status", "Erro desconhecido durante o processamento da mídia.")
+                    raise Exception(f"Processamento rejeitado pela Meta API: {err_detail}")
+
+        if not status_ok:
+            raise Exception("Tempo limite esgotado aguardando processamento do vídeo pela Meta.")
+
+        # 5. Publicar o Container
+        publish_url = f"https://graph.facebook.com/v22.0/{ig_user_id}/media_publish"
+        pub_res = requests.post(
+            publish_url,
+            data={"creation_id": container_id, "access_token": access_token},
+            timeout=30
+        )
+        if pub_res.status_code != 200:
+            raise Exception(f"Erro ao publicar mídia na Meta API: {pub_res.text}")
+
+        media_id = pub_res.json().get("id", container_id)
+        print(f"[Meta API] Mídia publicada com sucesso! ID: {media_id}")
+        return media_id
+
+    finally:
+        # Cleanup arquivos temporários do Cloud Storage
+        for k in uploaded_keys_to_clean:
+            try:
+                cloud_storage.delete_from_storage(k, db=db)
+            except Exception:
+                pass
 
 
 # ─── Unified Publish Entrypoint ───
@@ -440,17 +390,54 @@ def publish_post(video_path: str, caption: str, cookies_json: str, db: Session,
                  account_username: str = None, post_type: str = "reel",
                  carousel_images: list = None, cross_targets: list = None) -> str:
     """
-    Publish content using active session cookies and proxy via instagrapi.
+    Unified publishing entrypoint.
+    Automatically determines whether to publish via official Meta Graph API or instagrapi cookies.
     """
-    proxy_url = None
+    acc = None
     if account_username:
         clean_user = account_username.strip().lstrip('@')
-        acc = db.query(Account).filter((Account.username == clean_user) | (Account.display_name == account_username)).first()
-        if acc:
-            proxy_url = acc.proxy_url
-            if not cookies_json and acc.session_cookies:
-                cookies_json = acc.session_cookies
+        acc = db.query(Account).filter(
+            (Account.username == clean_user) |
+            (Account.display_name == account_username) |
+            (Account.ig_username == clean_user)
+        ).first()
 
-    # Publish via instagrapi
+    # Checar se a conta utiliza API Oficial da Meta
+    is_official = False
+    if acc:
+        if acc.auth_mode == "official" or acc.fb_access_token or acc.access_token:
+            is_official = True
+
+    if is_official and acc:
+        if getattr(acc, "revoked", False):
+            raise Exception(f"A conta @{acc.username} foi desautorizada na Meta. Por favor, reconecte nas Definições.")
+
+        ig_user_id = acc.ig_user_id or acc.fb_ig_account_id or acc.instagram_user_id
+        token = acc.access_token or acc.fb_access_token
+        if not token or not ig_user_id:
+            raise Exception(f"Conta oficial @{acc.username} incompleta (token ou ID da conta ausente).")
+
+        # Verificar limite de 100 posts por 24h
+        if not check_24h_post_limit(db, ig_user_id=ig_user_id, account_username=acc.username):
+            raise Exception(f"Limite móvel da Meta de 100 publicações em 24h atingido para @{acc.username}.")
+
+        media_id = publish_via_official_api(
+            video_path=video_path,
+            caption=caption,
+            access_token=token,
+            ig_user_id=ig_user_id,
+            post_type=post_type or "reel",
+            carousel_images=carousel_images,
+            db=db
+        )
+        return media_id
+
+    # Fallback para automação por cookies (instagrapi)
+    proxy_url = None
+    if acc:
+        proxy_url = acc.proxy_url
+        if not cookies_json and acc.session_cookies:
+            cookies_json = acc.session_cookies
+
     media_id = publish_via_instagrapi(video_path, caption, cookies_json, proxy_url)
     return media_id

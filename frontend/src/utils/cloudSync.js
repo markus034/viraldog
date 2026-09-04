@@ -1,16 +1,24 @@
 /**
- * Cloud Sync Utility — Handles VPS 24/7 Publishing, Account Syncing, and Video Uploads.
+ * Cloud Sync Utility — Handles Central Cloud 24/7 Publishing, Account Syncing, and Video Uploads.
  */
+import { getAuthToken, CLOUD_SERVER_URL } from '../config';
 
 const STORAGE_KEY = 'viraldog_cloud_config';
 
 export function getCloudConfig() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { enabled: false, vpsUrl: '', apiKey: '' };
-    return JSON.parse(raw);
+    if (!raw) {
+      return { enabled: true, vpsUrl: CLOUD_SERVER_URL, apiKey: '' };
+    }
+    const parsed = JSON.parse(raw);
+    return {
+      enabled: parsed.enabled !== false,
+      vpsUrl: parsed.vpsUrl || CLOUD_SERVER_URL,
+      apiKey: parsed.apiKey || ''
+    };
   } catch {
-    return { enabled: false, vpsUrl: '', apiKey: '' };
+    return { enabled: true, vpsUrl: CLOUD_SERVER_URL, apiKey: '' };
   }
 }
 
@@ -21,7 +29,7 @@ export function saveCloudConfig(config) {
     console.error('Error saving cloud config to localStorage:', e);
   }
 
-  // Persistir no banco de dados SQLite do backend
+  // Persistir no banco de dados SQLite do backend se local ativo
   try {
     fetch('http://localhost:8000/api/settings', {
       method: 'POST',
@@ -29,7 +37,7 @@ export function saveCloudConfig(config) {
       body: JSON.stringify({
         settings: {
           cloud_enabled: String(Boolean(config?.enabled)),
-          cloud_vps_url: String(config?.vpsUrl || ''),
+          cloud_vps_url: String(config?.vpsUrl || CLOUD_SERVER_URL),
           cloud_api_key: String(config?.apiKey || ''),
         }
       })
@@ -39,14 +47,22 @@ export function saveCloudConfig(config) {
   }
 }
 
-export async function testCloudConnection(vpsUrl, apiKey) {
-  if (!vpsUrl) throw new Error('URL da VPS não informada.');
-  
-  const cleanUrl = vpsUrl.replace(/\/+$/, '');
-  const headers = {};
+function buildCloudHeaders(apiKey = '', custom = {}) {
+  const headers = { ...custom };
+  const token = getAuthToken();
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
   if (apiKey) {
     headers['X-ViralDog-Key'] = apiKey.trim();
   }
+  return headers;
+}
+
+export async function testCloudConnection(vpsUrl, apiKey) {
+  const targetUrl = vpsUrl || CLOUD_SERVER_URL;
+  const cleanUrl = targetUrl.replace(/\/+$/, '');
+  const headers = buildCloudHeaders(apiKey);
 
   const res = await fetch(`${cleanUrl}/api/cloud/health`, {
     method: 'GET',
@@ -62,11 +78,9 @@ export async function testCloudConnection(vpsUrl, apiKey) {
 }
 
 export async function syncAccountToCloud(vpsUrl, apiKey, accountData) {
-  const cleanUrl = vpsUrl.replace(/\/+$/, '');
-  const headers = { 'Content-Type': 'application/json' };
-  if (apiKey) {
-    headers['X-ViralDog-Key'] = apiKey.trim();
-  }
+  const targetUrl = vpsUrl || CLOUD_SERVER_URL;
+  const cleanUrl = targetUrl.replace(/\/+$/, '');
+  const headers = buildCloudHeaders(apiKey, { 'Content-Type': 'application/json' });
 
   const res = await fetch(`${cleanUrl}/api/cloud/sync-account`, {
     method: 'POST',
@@ -76,19 +90,20 @@ export async function syncAccountToCloud(vpsUrl, apiKey, accountData) {
 
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({}));
-    throw new Error(errorData.detail || `Erro ao sincronizar conta com a VPS (${res.status})`);
+    throw new Error(errorData.detail || `Erro ao sincronizar conta com a Nuvem (${res.status})`);
   }
 
   return await res.json();
 }
 
 /**
- * Uploads a video file from local path or blob to the VPS with progress tracking.
+ * Uploads a video file from local path or blob to the Cloud Server with progress tracking.
  */
 export function uploadVideoToCloud(vpsUrl, apiKey, videoPathOrBlob, filename, onProgress) {
   return new Promise(async (resolve, reject) => {
     try {
-      const cleanUrl = vpsUrl.replace(/\/+$/, '');
+      const targetUrl = vpsUrl || CLOUD_SERVER_URL;
+      const cleanUrl = targetUrl.replace(/\/+$/, '');
       const uploadEndpoint = `${cleanUrl}/api/cloud/upload-video`;
 
       let fileBlob = videoPathOrBlob;
@@ -98,29 +113,32 @@ export function uploadVideoToCloud(vpsUrl, apiKey, videoPathOrBlob, filename, on
         const localUrl = `http://localhost:8000/api/videos/file?path=${encodeURIComponent(videoPathOrBlob)}`;
         const fileRes = await fetch(localUrl);
         if (!fileRes.ok) {
-          throw new Error(`Não foi possível ler o arquivo local: ${videoPathOrBlob}`);
+          throw new Error(`Não foi possível carregar o arquivo local para envio à Nuvem (${fileRes.status})`);
         }
         fileBlob = await fileRes.blob();
       }
 
       const formData = new FormData();
-      formData.append('file', fileBlob, filename || 'video.mp4');
-      if (filename) {
-        formData.append('custom_name', filename);
-      }
+      const safeFilename = filename || (typeof videoPathOrBlob === 'string' ? videoPathOrBlob.split(/[\\/]/).pop() : 'video.mp4');
+      formData.append('file', fileBlob, safeFilename);
+      formData.append('custom_name', safeFilename);
 
       const xhr = new XMLHttpRequest();
       xhr.open('POST', uploadEndpoint);
+      xhr.timeout = 300000; // 5 minutos de timeout para vídeos maiores
 
-      if (apiKey) {
-        xhr.setRequestHeader('X-ViralDog-Key', apiKey.trim());
-      }
+      const headers = buildCloudHeaders(apiKey);
+      Object.keys(headers).forEach(k => {
+        if (k.toLowerCase() !== 'content-type') {
+          xhr.setRequestHeader(k, headers[k]);
+        }
+      });
 
-      if (xhr.upload && onProgress) {
+      if (onProgress && xhr.upload) {
         xhr.upload.onprogress = (e) => {
           if (e.lengthComputable) {
             const percent = Math.round((e.loaded / e.total) * 100);
-            onProgress(percent, e.loaded, e.total);
+            onProgress(percent);
           }
         };
       }
@@ -143,8 +161,8 @@ export function uploadVideoToCloud(vpsUrl, apiKey, videoPathOrBlob, filename, on
         }
       };
 
-      xhr.onerror = () => reject(new Error('Erro de conexão durante o upload para a VPS.'));
-      xhr.ontimeout = () => reject(new Error('Tempo esgotado no upload para a VPS.'));
+      xhr.onerror = () => reject(new Error('Erro de conexão durante o upload para a Nuvem.'));
+      xhr.ontimeout = () => reject(new Error('Tempo esgotado no upload para a Nuvem.'));
 
       xhr.send(formData);
     } catch (err) {
@@ -154,11 +172,9 @@ export function uploadVideoToCloud(vpsUrl, apiKey, videoPathOrBlob, filename, on
 }
 
 export async function submitCloudBulkSchedule(vpsUrl, apiKey, payload) {
-  const cleanUrl = vpsUrl.replace(/\/+$/, '');
-  const headers = { 'Content-Type': 'application/json' };
-  if (apiKey) {
-    headers['X-ViralDog-Key'] = apiKey.trim();
-  }
+  const targetUrl = vpsUrl || CLOUD_SERVER_URL;
+  const cleanUrl = targetUrl.replace(/\/+$/, '');
+  const headers = buildCloudHeaders(apiKey, { 'Content-Type': 'application/json' });
 
   const res = await fetch(`${cleanUrl}/api/posts/bulk`, {
     method: 'POST',
@@ -168,18 +184,16 @@ export async function submitCloudBulkSchedule(vpsUrl, apiKey, payload) {
 
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({}));
-    throw new Error(errorData.detail || `Erro ao registrar agendamentos na VPS (${res.status})`);
+    throw new Error(errorData.detail || `Erro ao registrar agendamentos na Nuvem (${res.status})`);
   }
 
   return await res.json();
 }
 
 export async function submitCloudPost(vpsUrl, apiKey, payload) {
-  const cleanUrl = vpsUrl.replace(/\/+$/, '');
-  const headers = { 'Content-Type': 'application/json' };
-  if (apiKey) {
-    headers['X-ViralDog-Key'] = apiKey.trim();
-  }
+  const targetUrl = vpsUrl || CLOUD_SERVER_URL;
+  const cleanUrl = targetUrl.replace(/\/+$/, '');
+  const headers = buildCloudHeaders(apiKey, { 'Content-Type': 'application/json' });
 
   const res = await fetch(`${cleanUrl}/api/posts`, {
     method: 'POST',
@@ -189,7 +203,7 @@ export async function submitCloudPost(vpsUrl, apiKey, payload) {
 
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({}));
-    throw new Error(errorData.detail || `Erro ao registrar agendamento na VPS (${res.status})`);
+    throw new Error(errorData.detail || `Erro ao registrar agendamento na Nuvem (${res.status})`);
   }
 
   return await res.json();

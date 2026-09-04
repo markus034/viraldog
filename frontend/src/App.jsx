@@ -5,14 +5,18 @@ import Editor from './components/editor/Editor';
 import Publisher from './components/Publisher';
 import Analytics from './components/Analytics';
 import Settings from './components/Settings';
+import LoginModal from './components/LoginModal';
 import logoImage from './assets/logo.jpg';
 import { saveCloudConfig } from './utils/cloudSync';
+import { getCurrentUser, setCurrentUser, setAuthToken, apiFetch } from './config';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('analytics');
   const [toast, setToast] = useState(null);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(true);
   const [globalBrowserRequested, setGlobalBrowserRequested] = useState(false);
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+  const [currentUser, setCurrentUserState] = useState(() => getCurrentUser());
 
   // Track which tabs have been visited at least once (lazy-mount)
   const [mountedTabs, setMountedTabs] = useState(new Set(['analytics']));
@@ -173,6 +177,44 @@ export default function App() {
           </ul>
         </nav>
 
+        {/* Cloud / User Account button at the bottom */}
+        <div className="w-full mb-2 sidebar-nav-item">
+          <button 
+            type="button"
+            onClick={() => {
+              if (currentUser) {
+                if (window.confirm(`Logado como ${currentUser.email}. Deseja desconectar da Nuvem?`)) {
+                  setAuthToken(null);
+                  setCurrentUser(null);
+                  setCurrentUserState(null);
+                  triggerToast('Você desconectou da Nuvem ViralDog.', 'info');
+                }
+              } else {
+                setIsLoginModalOpen(true);
+              }
+            }}
+            className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-xs transition-all duration-200 cursor-pointer ${
+              currentUser 
+                ? 'bg-emerald-500/10 text-emerald-700 hover:bg-emerald-500/15 border border-emerald-500/20 font-semibold' 
+                : 'bg-[#0071E3]/10 text-[#0071E3] hover:bg-[#0071E3]/15 border border-[#0071E3]/20 font-semibold'
+            }`}
+            style={{ justifyContent: isSidebarCollapsed ? 'center' : 'flex-start' }}
+            title={currentUser ? `Conectado como ${currentUser.email}` : 'Conectar à Nuvem 24/7'}
+          >
+            <span className="material-symbols-outlined text-[18px]">
+              {currentUser ? 'cloud_done' : 'cloud'}
+            </span>
+            <span className="nav-label truncate">
+              {currentUser ? (currentUser.name || currentUser.email) : 'Nuvem 24/7'}
+            </span>
+          </button>
+          {isSidebarCollapsed && (
+            <span className="sidebar-tooltip">
+              {currentUser ? `Nuvem: ${currentUser.email}` : 'Conectar Nuvem'}
+            </span>
+          )}
+        </div>
+
         {/* Settings button at the bottom */}
         <div className="w-full mb-4 sidebar-nav-item">
           <button 
@@ -242,6 +284,18 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* Login / Nuvem Modal */}
+      <LoginModal
+        isOpen={isLoginModalOpen}
+        onClose={() => setIsLoginModalOpen(false)}
+        onLoginSuccess={(user) => {
+          setCurrentUserState(user);
+          triggerToast(`Nuvem 24/7 conectada como ${user.email}! ☁️`, 'success');
+          window.dispatchEvent(new CustomEvent('viraldog:accounts-updated'));
+        }}
+        triggerToast={triggerToast}
+      />
 
       {/* Notification Toast */}
       {toast && (

@@ -79,9 +79,17 @@ export default function Settings({ triggerToast, onOpenGlobalBrowser }) {
     analytics_collect_interval_hours: '6',
     meta_app_id: '',
     meta_app_secret: '',
+    meta_redirect_uri: '',
     public_media_base_url: '',
+    s3_endpoint_url: '',
+    s3_bucket_name: '',
+    s3_access_key: '',
+    s3_secret_key: '',
+    s3_public_base_url: '',
+    vary_captions_ai: 'false',
   });
   const [savingConfigs, setSavingConfigs] = useState(false);
+  const [testingStorage, setTestingStorage] = useState(false);
 
   useEffect(() => {
     fetchAccounts();
@@ -334,6 +342,33 @@ export default function Settings({ triggerToast, onOpenGlobalBrowser }) {
 
   const handleConfigChange = (key, value) => {
     setConfigs({ ...configs, [key]: value });
+  };
+
+  const handleTestStorage = async () => {
+    setTestingStorage(true);
+    try {
+      const res = await fetch(`${API}/api/settings/test-storage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          s3_endpoint_url: configs.s3_endpoint_url,
+          s3_bucket_name: configs.s3_bucket_name,
+          s3_access_key: configs.s3_access_key,
+          s3_secret_key: configs.s3_secret_key,
+          s3_public_base_url: configs.s3_public_base_url,
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        triggerToast(`✅ ${data.message}`, 'success');
+      } else {
+        triggerToast(`❌ ${data.detail || data.message || 'Erro ao conectar ao storage.'}`, 'error');
+      }
+    } catch (e) {
+      triggerToast('Erro de rede ao testar storage.', 'error');
+    } finally {
+      setTestingStorage(false);
+    }
   };
 
   const handleIgLogin = async () => {
@@ -768,6 +803,147 @@ export default function Settings({ triggerToast, onOpenGlobalBrowser }) {
                   </button>
                 )}
               </div>
+            </div>
+
+            {/* ─── Seção: Meta Graph API (Instagram Oficial) ─── */}
+            <div className="pt-3 border-t border-outline-variant/15 flex flex-col gap-3">
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-[18px] text-[#0084FF]">verified</span>
+                <div>
+                  <h4 className="text-xs font-bold text-text-primary">Meta Graph API (Instagram Oficial)</h4>
+                  <p className="text-[10px] text-text-secondary">App criado em developers.facebook.com para conexão oficial de contas.</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-[11px] font-semibold text-text-primary">Meta App ID</label>
+                  <input 
+                    type="text" 
+                    placeholder="1640190021019907"
+                    value={configs.meta_app_id || ''} 
+                    onChange={e => handleConfigChange('meta_app_id', e.target.value)} 
+                    className="w-full p-2.5 bg-white border border-[#E8E8ED] hover:border-[#86868B]/40 rounded-xl text-xs text-text-primary focus:outline-none focus:border-[#0071E3] focus:ring-4 focus:ring-[#0071E3]/15 transition-all shadow-xs"
+                  />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-[11px] font-semibold text-text-primary">Meta App Secret</label>
+                  <input 
+                    type="password" 
+                    placeholder="Chave secreta do app Meta"
+                    value={configs.meta_app_secret || ''} 
+                    onChange={e => handleConfigChange('meta_app_secret', e.target.value)} 
+                    className="w-full p-2.5 bg-white border border-[#E8E8ED] hover:border-[#86868B]/40 rounded-xl text-xs text-text-primary focus:outline-none focus:border-[#0071E3] focus:ring-4 focus:ring-[#0071E3]/15 transition-all shadow-xs font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[11px] font-semibold text-text-primary">Redirect URI (Callback)</label>
+                <input 
+                  type="text" 
+                  placeholder="https://seudominio.com/auth/callback ou http://localhost:8000/auth/callback"
+                  value={configs.meta_redirect_uri || ''} 
+                  onChange={e => handleConfigChange('meta_redirect_uri', e.target.value)} 
+                  className="w-full p-2.5 bg-white border border-[#E8E8ED] hover:border-[#86868B]/40 rounded-xl text-xs text-text-primary focus:outline-none focus:border-[#0071E3] focus:ring-4 focus:ring-[#0071E3]/15 transition-all shadow-xs"
+                />
+              </div>
+            </div>
+
+            {/* ─── Seção: Cloud Storage (Cloudflare R2 / AWS S3) ─── */}
+            <div className="pt-3 border-t border-outline-variant/15 flex flex-col gap-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="material-symbols-outlined text-[18px] text-[#F38020]">cloud_upload</span>
+                  <div>
+                    <h4 className="text-xs font-bold text-text-primary">Cloud Storage (Cloudflare R2 / S3)</h4>
+                    <p className="text-[10px] text-text-secondary">Obrigatório para a Meta baixar suas mídias durante a publicação.</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleTestStorage}
+                  disabled={testingStorage}
+                  className="px-3 py-1.5 rounded-xl text-[11px] font-bold bg-white border border-[#E8E8ED] hover:border-[#0071E3]/40 hover:bg-[#F5F5F7] active:scale-98 text-text-primary flex items-center gap-1 transition-all shadow-xs cursor-pointer"
+                >
+                  {testingStorage ? <div className="spinner !w-3.5 !h-3.5"></div> : <span className="material-symbols-outlined text-[14px]">sensors</span>}
+                  <span>Testar Storage</span>
+                </button>
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[11px] font-semibold text-text-primary">Endpoint URL (S3 / R2)</label>
+                <input 
+                  type="text" 
+                  placeholder="https://<id-conta>.r2.cloudflarestorage.com"
+                  value={configs.s3_endpoint_url || ''} 
+                  onChange={e => handleConfigChange('s3_endpoint_url', e.target.value)} 
+                  className="w-full p-2.5 bg-white border border-[#E8E8ED] hover:border-[#86868B]/40 rounded-xl text-xs text-text-primary focus:outline-none focus:border-[#0071E3] focus:ring-4 focus:ring-[#0071E3]/15 transition-all shadow-xs"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-[11px] font-semibold text-text-primary">Bucket Name</label>
+                  <input 
+                    type="text" 
+                    placeholder="viraldog-media"
+                    value={configs.s3_bucket_name || ''} 
+                    onChange={e => handleConfigChange('s3_bucket_name', e.target.value)} 
+                    className="w-full p-2.5 bg-white border border-[#E8E8ED] hover:border-[#86868B]/40 rounded-xl text-xs text-text-primary focus:outline-none focus:border-[#0071E3] focus:ring-4 focus:ring-[#0071E3]/15 transition-all shadow-xs"
+                  />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-[11px] font-semibold text-text-primary">Access Key ID</label>
+                  <input 
+                    type="text" 
+                    placeholder="Chave de Acesso"
+                    value={configs.s3_access_key || ''} 
+                    onChange={e => handleConfigChange('s3_access_key', e.target.value)} 
+                    className="w-full p-2.5 bg-white border border-[#E8E8ED] hover:border-[#86868B]/40 rounded-xl text-xs text-text-primary focus:outline-none focus:border-[#0071E3] focus:ring-4 focus:ring-[#0071E3]/15 transition-all shadow-xs font-mono"
+                  />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-[11px] font-semibold text-text-primary">Secret Access Key</label>
+                  <input 
+                    type="password" 
+                    placeholder="Segredo S3/R2"
+                    value={configs.s3_secret_key || ''} 
+                    onChange={e => handleConfigChange('s3_secret_key', e.target.value)} 
+                    className="w-full p-2.5 bg-white border border-[#E8E8ED] hover:border-[#86868B]/40 rounded-xl text-xs text-text-primary focus:outline-none focus:border-[#0071E3] focus:ring-4 focus:ring-[#0071E3]/15 transition-all shadow-xs font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[11px] font-semibold text-text-primary">Public Base URL / Domínio Público (Opcional se usar Presigned)</label>
+                <input 
+                  type="text" 
+                  placeholder="https://media.seudominio.com ou https://pub-xxx.r2.dev"
+                  value={configs.s3_public_base_url || ''} 
+                  onChange={e => handleConfigChange('s3_public_base_url', e.target.value)} 
+                  className="w-full p-2.5 bg-white border border-[#E8E8ED] hover:border-[#86868B]/40 rounded-xl text-xs text-text-primary focus:outline-none focus:border-[#0071E3] focus:ring-4 focus:ring-[#0071E3]/15 transition-all shadow-xs"
+                />
+              </div>
+            </div>
+
+            {/* ─── Seção: Variação Inteligente Multi-Contas ─── */}
+            <div className="pt-3 border-t border-outline-variant/15 flex flex-col gap-2">
+              <label className="flex justify-between items-center cursor-pointer">
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-xs font-semibold text-text-primary">Variar legendas com IA para multi-contas</span>
+                  <span className="text-[10px] text-text-secondary">Evita publicações com textos 100% idênticos postados no mesmo instante por contas diferentes.</span>
+                </div>
+                <div className="relative inline-flex items-center">
+                  <input 
+                    type="checkbox" 
+                    checked={configs.vary_captions_ai === 'true'}
+                    onChange={e => handleConfigChange('vary_captions_ai', e.target.checked ? 'true' : 'false')}
+                    className="sr-only peer"
+                  />
+                  <div className="w-9 h-5 bg-surface-container-high rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[#0071E3]"></div>
+                </div>
+              </label>
             </div>
 
             <button 

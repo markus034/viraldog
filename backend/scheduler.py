@@ -34,6 +34,14 @@ def run_scheduler():
 
             # ── Job 1: Publish pending posts ──
             pending = db.query(Post).filter(Post.status == "pending", Post.scheduled_time <= now).all()
+            
+            # Verificar se a opção de variar legenda com IA para multi-contas está ativada
+            from database import Config
+            cfg_vary = db.query(Config).filter(Config.key == "vary_captions_ai").first()
+            vary_captions = bool(cfg_vary and cfg_vary.value.lower() == "true")
+
+            seen_media_in_batch = set()
+
             for post in pending:
                 print(f"Scheduler: Publishing post {post.id}...")
                 post.status = "processing"
@@ -49,22 +57,44 @@ def run_scheduler():
                     cross_targets = json.loads(post.cross_post_targets) if post.cross_post_targets else None
                     carousel_images = json.loads(post.carousel_image_paths) if post.carousel_image_paths else None
 
+                    # Variação automática de legenda para multi-contas se habilitado
+                    caption_to_use = post.caption or ""
+                    if vary_captions and post.video_path in seen_media_in_batch and caption_to_use:
+                        try:
+                            import backend_ai_service as ai_service
+                            caption_to_use = ai_service.generate_caption_variation(db, caption_to_use)
+                            print(f"Scheduler: Variação de legenda gerada com IA para post #{post.id} (@{post.account_username})")
+                        except Exception as ai_err:
+                            print(f"Scheduler: Falha ao variar legenda com IA: {ai_err}")
+
+                    seen_media_in_batch.add(post.video_path)
+
                     media_id = publisher.publish_post(
-                        post.video_path, post.caption, cookies_json, db,
+                        post.video_path, caption_to_use, cookies_json, db,
                         post.account_username, post.post_type or "reel",
                         carousel_images, cross_targets
                     )
                     post.status = "posted"
                     post.ig_media_id = media_id
+                    post.published_at = datetime.utcnow()
                     post.error_message = None
                     print(f"Scheduler: Post {post.id} published — media_id {media_id}")
                 except Exception as ex:
-                    post.status = "failed"
-                    post.error_message = str(ex)
-                    print(f"Scheduler: Post {post.id} failed: {ex}")
+                    err_str = str(ex)
+                    # Se atingiu o limite de 100 posts em 24h, adiar 1 hora em vez de falhar definitivamente
+                    if "100 publicações em 24h" in err_str:
+                        from datetime import timedelta
+                        post.status = "pending"
+                        post.scheduled_time = datetime.utcnow() + timedelta(hours=1)
+                        post.error_message = f"Limite diário da Meta atingido. Post postergado para {post.scheduled_time.strftime('%H:%M')}."
+                        print(f"Scheduler: Post #{post.id} postergado por limite de 100 posts/24h da Meta.")
+                    else:
+                        post.status = "failed"
+                        post.error_message = err_str
+                        print(f"Scheduler: Post {post.id} failed: {ex}")
                 db.commit()
-                # Intervalo preventivo entre posts para não estourar rate limit do Instagram
-                time.sleep(5)
+                # Intervalo preventivo de 3 a 5s entre posts para evitar rate limit (429) da Meta
+                time.sleep(3)
 
             # ── Job 2: Collect analytics ──
             if _should_run(db, "analytics_collect"):

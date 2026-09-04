@@ -83,4 +83,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Polling de auth no navegador interno
   startAuthSessionPoll: (partitionName, username) => ipcRenderer.send('start-auth-session-poll', partitionName, username),
   stopAuthSessionPoll: () => ipcRenderer.send('stop-auth-session-poll'),
+
+  // Meta OAuth Deep Link listener (viraldog://auth/callback)
+  onMetaOAuthComplete: (callback) => {
+    const listener = (event, value) => callback(value)
+    ipcRenderer.on('meta-oauth-complete', listener)
+    return () => ipcRenderer.removeListener('meta-oauth-complete', listener)
+  },
+  removeMetaOAuthComplete: () => ipcRenderer.removeAllListeners('meta-oauth-complete'),
 })

@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from database import get_db, Account, Post
-from utils import get_config_directory, get_absolute_path, session_uploads, fs_cache
+from utils import get_config_directory, get_absolute_path, session_uploads, session_videos, fs_cache
 
 router = APIRouter(tags=["videos"])
 

@@ -4,11 +4,12 @@ import json
 import requests
 import threading
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from database import get_db, SessionLocal, Account, AccountProfile, Post, FollowerSnapshot, APP_DATA_DIR
 from schemas import CookieAccountCreate, AccountPatchRequest, AccountProfileUpdate
+from routers.auth import get_current_user
 
 AVATARS_DIR = os.path.join(APP_DATA_DIR, "avatars")
 os.makedirs(AVATARS_DIR, exist_ok=True)
@@ -84,8 +85,15 @@ def trigger_avatar_sync(account_id: int):
 
 
 @router.get("")
-def list_accounts(db: Session = Depends(get_db)):
-    accounts = db.query(Account).all()
+def list_accounts(request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
+    query = db.query(Account)
+    if user:
+        query = query.filter(Account.owner_user_id == str(user.id))
+    else:
+        # Se requisição não autenticada no modo local
+        query = query.filter((Account.owner_user_id == "default") | (Account.owner_user_id == None))
+    accounts = query.all()
     return [{
         "id": a.id, "username": a.username, "status": a.status,
         "proxy_url": a.proxy_url, "notes": a.notes, "tags": a.tags,
@@ -93,22 +101,26 @@ def list_accounts(db: Session = Depends(get_db)):
         "platform": a.platform or "instagram",
         "display_name": a.display_name,
         "avatar_url": a.avatar_url,
-        "has_session": bool(a.session_cookies), # Flag indicando se há sessão salva
-        "session_cookies": a.session_cookies, # Sessão salva para injeção no browser
-        "auth_mode": a.auth_mode or "cookie", # "official" (OAuth Instagram Login) or "cookie"
-        "token_expires_at": a.token_expires_at.isoformat() if a.token_expires_at else None,
-        "has_official_token": bool(a.fb_access_token),
-        "fb_access_token": a.fb_access_token,
-        "fb_ig_account_id": a.fb_ig_account_id,
-        "instagram_user_id": a.instagram_user_id,
-        "created_at": a.created_at.isoformat() if a.created_at else None,
+        "auth_mode": a.auth_mode or "cookies",
         "last_opened_at": a.last_opened_at.isoformat() if a.last_opened_at else None,
+        "token_expires_at": a.token_expires_at.isoformat() if a.token_expires_at else None,
+        "fb_token_expires_at": a.fb_token_expires_at.isoformat() if a.fb_token_expires_at else None,
+        "has_session": bool(a.session_cookies),
+        "has_official_token": bool(a.fb_access_token),
+        "fb_ig_account_id": a.fb_ig_account_id,
+        "created_at": a.created_at.isoformat() if a.created_at else None
     } for a in accounts]
 
 
-@router.post("")
-def add_account(req: CookieAccountCreate, db: Session = Depends(get_db)):
-    acc = db.query(Account).filter(Account.username == req.username).first()
+@router.post("/cookie")
+def create_account_with_cookies(req: CookieAccountCreate, request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
+    owner_user_id = str(user.id) if user else "default"
+
+    clean_user = req.username.replace("@", "").strip()
+    # Buscar apenas dentro das contas do próprio usuário
+    acc = db.query(Account).filter(Account.owner_user_id == owner_user_id, Account.username == clean_user).first()
+    
     cookies = req.cookies_json if req.cookies_json else None
     if acc:
         if cookies:
@@ -142,10 +154,13 @@ def touch_account_open(account_id: int, db: Session = Depends(get_db)):
 
 
 @router.patch("/{account_id}")
-def patch_account(account_id: int, req: AccountPatchRequest, db: Session = Depends(get_db)):
+def patch_account(account_id: int, req: AccountPatchRequest, request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
     acc = db.query(Account).filter(Account.id == account_id).first()
     if not acc:
         raise HTTPException(status_code=404, detail="Conta não encontrada")
+    if user and acc.owner_user_id and acc.owner_user_id != str(user.id) and acc.owner_user_id != "default":
+        raise HTTPException(status_code=403, detail="Acesso não autorizado a esta conta.")
 
     old_username = acc.username
     update_data = req.model_dump(exclude_unset=True) if hasattr(req, "model_dump") else req.dict(exclude_unset=True)
@@ -212,10 +227,13 @@ def sync_account_avatar(account_id: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/{account_id}")
-def delete_account(account_id: int, db: Session = Depends(get_db)):
+def delete_account(account_id: int, request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
     acc = db.query(Account).filter(Account.id == account_id).first()
     if not acc:
         raise HTTPException(status_code=404, detail="Conta não encontrada")
+    if user and acc.owner_user_id and acc.owner_user_id != str(user.id) and acc.owner_user_id != "default":
+        raise HTTPException(status_code=403, detail="Acesso não autorizado a esta conta.")
     db.delete(acc)
     db.commit()
     return {"status": "success"}

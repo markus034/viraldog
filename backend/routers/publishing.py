@@ -1,16 +1,44 @@
 """Publishing, scheduling, repost, and AI caption endpoints."""
+import os
 import json
+import secrets
 from datetime import datetime, timezone, timedelta
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Form
+from fastapi import APIRouter, Depends, HTTPException, Form, UploadFile, File, Request
 from sqlalchemy.orm import Session
-from database import get_db, Post, Account
+from database import get_db, Post, Account, APP_DATA_DIR
 from schemas import SchedulePostRequest, BulkScheduleRequest, AIRequest, RepostRequest
+from routers.auth import get_current_user
 import backend_ai_service as ai_service
 import backend_publisher as publisher
 import backend_analytics as analytics
 
 router = APIRouter(tags=["publishing"])
+
+
+@router.post("/api/posts/upload-media")
+async def upload_post_media(file: UploadFile = File(...)):
+    """Receives video/image uploads from the desktop app and saves locally on the server."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Arquivo inválido.")
+    
+    uploads_dir = os.path.join(APP_DATA_DIR, "uploads")
+    os.makedirs(uploads_dir, exist_ok=True)
+    
+    ext = os.path.splitext(file.filename)[1].lower() or ".mp4"
+    safe_name = f"{int(datetime.utcnow().timestamp())}_{secrets.token_hex(4)}{ext}"
+    dest_path = os.path.join(uploads_dir, safe_name)
+    
+    with open(dest_path, "wb") as buffer:
+        while chunk := await file.read(1024 * 1024):
+            buffer.write(chunk)
+            
+    return {
+        "status": "success",
+        "file_path": dest_path,
+        "filename": safe_name,
+        "public_url": f"/uploads/{safe_name}"
+    }
 
 
 @router.post("/api/ai/caption")
@@ -35,16 +63,26 @@ def _parse_scheduled_dt(scheduled_time_str: str) -> datetime:
 
 
 @router.post("/api/posts")
-def schedule_post(req: SchedulePostRequest, db: Session = Depends(get_db)):
+def schedule_post(req: SchedulePostRequest, request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
+    owner_user_id = str(user.id) if user else "default"
+
+    ig_user_id = None
     if req.account_username:
         clean_user = req.account_username.strip().lstrip('@')
         acc = db.query(Account).filter((Account.username == clean_user) | (Account.display_name == req.account_username)).first()
         if not acc:
             raise HTTPException(status_code=400, detail=f"Conta {req.account_username} não encontrada.")
-        if not acc.session_cookies:
+        
+        # Validar contas oficiais vs modo cookie
+        if acc.auth_mode == "official" or acc.fb_access_token or acc.access_token:
+            if getattr(acc, 'revoked', False):
+                raise HTTPException(status_code=400, detail=f"A conta @{req.account_username} foi desautorizada na Meta. Reconecte nas Definições.")
+            ig_user_id = acc.ig_user_id or acc.fb_ig_account_id
+        elif not acc.session_cookies:
             raise HTTPException(
                 status_code=400,
-                detail=f"A conta @{req.account_username} não possui sessão ativa de cookies salva."
+                detail=f"A conta @{req.account_username} não possui sessão ativa ou token da Meta configurado."
             )
 
     try:
@@ -53,8 +91,9 @@ def schedule_post(req: SchedulePostRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Data/hora inválida. Formato correto: YYYY-MM-DDTHH:MM:SS ou ISO UTC.")
 
     post = Post(
+        owner_user_id=owner_user_id,
         video_path=req.video_path, caption=req.caption, scheduled_time=dt_utc,
-        account_username=req.account_username, status="pending", post_type=req.post_type,
+        account_username=req.account_username, ig_user_id=ig_user_id, status="pending", post_type=req.post_type,
         carousel_image_paths=json.dumps(req.carousel_image_paths) if req.carousel_image_paths else None
     )
     db.add(post)
@@ -63,21 +102,30 @@ def schedule_post(req: SchedulePostRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/api/posts/bulk")
-def bulk_schedule_posts(req: BulkScheduleRequest, db: Session = Depends(get_db)):
+def bulk_schedule_posts(req: BulkScheduleRequest, request: Request, db: Session = Depends(get_db)):
     if not req.posts:
         raise HTTPException(status_code=400, detail="Nenhum post fornecido para agendamento em massa.")
+
+    user = get_current_user(request, db)
+    owner_user_id = str(user.id) if user else "default"
 
     created_ids = []
 
     for item in req.posts:
+        ig_user_id = None
         if item.account_username:
             clean_user = item.account_username.strip().lstrip('@')
             acc = db.query(Account).filter((Account.username == clean_user) | (Account.display_name == item.account_username)).first()
-            if acc and not acc.session_cookies:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"A conta {item.account_username} não possui sessão de cookies salva."
-                )
+            if acc:
+                if acc.auth_mode == "official" or acc.fb_access_token or acc.access_token:
+                    if getattr(acc, 'revoked', False):
+                        raise HTTPException(status_code=400, detail=f"A conta {item.account_username} foi desautorizada na Meta. Reconecte.")
+                    ig_user_id = acc.ig_user_id or acc.fb_ig_account_id
+                elif not acc.session_cookies:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"A conta {item.account_username} não possui sessão de cookies salva ou token da Meta."
+                    )
 
         try:
             dt_utc = _parse_scheduled_dt(item.scheduled_time)
@@ -85,10 +133,12 @@ def bulk_schedule_posts(req: BulkScheduleRequest, db: Session = Depends(get_db))
             raise HTTPException(status_code=400, detail=f"Data/hora inválida para o vídeo: {item.video_path}")
 
         post = Post(
+            owner_user_id=owner_user_id,
             video_path=item.video_path,
             caption=item.caption,
             scheduled_time=dt_utc,
             account_username=item.account_username,
+            ig_user_id=ig_user_id,
             status="pending",
             post_type=item.post_type or "reel"
         )
@@ -100,8 +150,12 @@ def bulk_schedule_posts(req: BulkScheduleRequest, db: Session = Depends(get_db))
 
 
 @router.get("/api/posts")
-def list_posts(db: Session = Depends(get_db)):
-    posts = db.query(Post).order_by(Post.scheduled_time.asc()).all()
+def list_posts(request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
+    query = db.query(Post)
+    if user:
+        query = query.filter((Post.owner_user_id == str(user.id)) | (Post.owner_user_id == "default"))
+    posts = query.order_by(Post.scheduled_time.asc()).all()
     accounts = db.query(Account).all()
     acc_map = {}
     for a in accounts:
@@ -125,10 +179,13 @@ def list_posts(db: Session = Depends(get_db)):
 
 
 @router.post("/api/posts/{post_id}/retry")
-def retry_post(post_id: int, db: Session = Depends(get_db)):
+def retry_post(post_id: int, request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
     post = db.query(Post).filter(Post.id == post_id).first()
     if not post:
         raise HTTPException(status_code=404, detail="Agendamento não encontrado")
+    if user and post.owner_user_id and post.owner_user_id != str(user.id) and post.owner_user_id != "default":
+        raise HTTPException(status_code=403, detail="Acesso não autorizado a este post.")
     
     if post.account_username:
         acc = db.query(Account).filter(Account.username == post.account_username).first()
@@ -151,10 +208,13 @@ def retry_post(post_id: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/api/posts/{post_id}")
-def delete_post(post_id: int, db: Session = Depends(get_db)):
+def delete_post(post_id: int, request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
     post = db.query(Post).filter(Post.id == post_id).first()
     if not post:
         raise HTTPException(status_code=404, detail="Agendamento não encontrado")
+    if user and post.owner_user_id and post.owner_user_id != str(user.id) and post.owner_user_id != "default":
+        raise HTTPException(status_code=403, detail="Acesso não autorizado a este post.")
     db.delete(post)
     db.commit()
     return {"status": "success"}

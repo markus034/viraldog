@@ -323,9 +323,18 @@ export default function PostForm({ pubState, triggerToast }) {
                   required
                   icon="person"
                   options={accounts.map(acc => {
-                    const isDisconnected = !acc.has_session;
+                    const isOfficial = acc.has_official_token || acc.auth_mode === 'official';
+                    const isRevoked = Boolean(acc.revoked);
+                    const isDisconnected = !isOfficial && !acc.has_session;
                     const name = acc.display_name || acc.username;
-                    const badgeLabel = isDisconnected ? `@${name} (⚠️ Sem Sessão)` : `@${name}`;
+                    let badgeLabel = `@${name}`;
+                    if (isRevoked) {
+                      badgeLabel = `@${name} (⚠️ Desautorizada na Meta)`;
+                    } else if (isOfficial) {
+                      badgeLabel = `@${name} (✓ Meta Oficial)`;
+                    } else if (isDisconnected) {
+                      badgeLabel = `@${name} (⚠️ Sem Sessão)`;
+                    }
                     return {
                       value: acc.username,
                       label: badgeLabel,
@@ -336,7 +345,27 @@ export default function PostForm({ pubState, triggerToast }) {
                 />
                 {(() => {
                   const currentAcc = accounts.find(a => a.username === selectedAccount);
-                  if (currentAcc && !currentAcc.has_session) {
+                  if (!currentAcc) return null;
+                  const isOfficial = currentAcc.has_official_token || currentAcc.auth_mode === 'official';
+                  if (currentAcc.revoked) {
+                    return (
+                      <div className="flex items-center gap-2 p-3 bg-rose-50 border border-rose-200 rounded-2xl mt-2 text-xs text-rose-900 font-medium">
+                        <span className="material-symbols-outlined text-rose-600 text-[18px]">warning</span>
+                        <span>A conta <strong>@{currentAcc.username}</strong> foi desautorizada na Meta. Por favor, reconecte na aba Perfis.</span>
+                      </div>
+                    );
+                  }
+                  if (isOfficial) {
+                    return (
+                      <div className="flex items-center gap-2 p-3 bg-emerald-50/80 border border-emerald-200/80 rounded-2xl mt-2 backdrop-blur-sm animate-fadeIn text-xs text-emerald-900 font-medium">
+                        <span className="material-symbols-outlined text-emerald-600 text-[18px]">verified</span>
+                        <span>
+                          Conta protegida pela <strong>API Oficial da Meta</strong>. Posts serão publicados com máxima segurança e sem dependência de cookies locais.
+                        </span>
+                      </div>
+                    );
+                  }
+                  if (!currentAcc.has_session) {
                     return (
                       <div className="flex items-center justify-between gap-3 p-3.5 bg-amber-50/90 border border-amber-200/90 rounded-2xl mt-2 backdrop-blur-sm animate-fadeIn">
                         <div className="flex items-center gap-2.5 min-w-0">
@@ -364,16 +393,6 @@ export default function PostForm({ pubState, triggerToast }) {
                             </>
                           )}
                         </button>
-                      </div>
-                    );
-                  }
-                  if (currentAcc && currentAcc.has_official_token) {
-                    return (
-                      <div className="flex items-center gap-2 p-3 bg-emerald-50/80 border border-emerald-200/80 rounded-2xl mt-2 backdrop-blur-sm animate-fadeIn text-xs text-emerald-900 font-medium">
-                        <span className="material-symbols-outlined text-emerald-600 text-[18px]">verified</span>
-                        <span>
-                          Conta protegida pela <strong>API Oficial da Meta</strong>. Posts serão publicados sem risco de suspeita de automação.
-                        </span>
                       </div>
                     );
                   }

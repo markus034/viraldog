@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "postbuild": "node -e \"const fs=require('fs'); ['privacidade','termos','exclusao-de-dados','auth/callback'].forEach(p=>{fs.mkdirSync('out/'+p,{recursive:true});if(fs.existsSync('out/'+p+'.html'))fs.copyFileSync('out/'+p+'.html','out/'+p+'/index.html');})\"",
     "start": "next start",
     "lint": "next lint"
   },

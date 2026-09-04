@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import CustomSelect from './CustomSelect';
-
-const API = 'http://localhost:8000';
+import { API, apiFetch } from '../config';
 
 /**
  * Aceita qualquer formato comum de proxy e normaliza para http://user:pass@host:port
@@ -157,6 +156,66 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
       else window.electronAPI.removeProfileLoginComplete?.();
     };
   }, [isElectron, triggerToast]);
+
+  // Listener para capturar o callback do popup oficial da Meta
+  useEffect(() => {
+    const handleMessage = async (event) => {
+      if (!event.data) return;
+      if (event.data.type === 'META_OAUTH_SUCCESS') {
+        const accs = event.data.accounts || [];
+        const names = accs.map(a => `@${a.username}`).join(', ');
+        triggerToast(`✅ Conta(s) Oficial Meta vinculada(s) com sucesso: ${names}!`, 'success');
+        await fetchAccounts(true);
+      } else if (event.data.type === 'META_OAUTH_ERROR' || event.data.type === 'IG_OAUTH_ERROR') {
+        triggerToast(`❌ Erro na autorização da Meta: ${event.data.error || 'Operação cancelada'}`, 'error');
+      }
+    };
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [triggerToast]);
+
+  // Listener para capturar o Deep Link nativo (viraldog://auth/callback)
+  useEffect(() => {
+    if (!isElectron || !window.electronAPI?.onMetaOAuthComplete) return;
+
+    const cleanup = window.electronAPI.onMetaOAuthComplete(async (data) => {
+      console.log('[MultiLogin] Deep Link da Meta recebido:', data);
+      triggerToast('✅ Conta oficial da Meta vinculada com sucesso pelo aplicativo!', 'success');
+      await fetchAccounts(true);
+    });
+
+    return () => {
+      if (typeof cleanup === 'function') cleanup();
+      else window.electronAPI.removeMetaOAuthComplete?.();
+    };
+  }, [isElectron, triggerToast]);
+
+  const handleStartMetaOAuthLogin = async () => {
+    try {
+      const res = await apiFetch('/api/auth/meta/url');
+      const data = await res.json();
+      if (res.ok && data.auth_url) {
+        const width = 640;
+        const height = 760;
+        const left = (window.innerWidth - width) / 2 + window.screenX;
+        const top = (window.innerHeight - height) / 2 + window.screenY;
+        const popup = window.open(
+          data.auth_url,
+          'MetaOAuth',
+          `width=${width},height=${height},top=${top},left=${left},status=no,toolbar=no,menubar=no`
+        );
+        if (!popup) {
+          window.open(data.auth_url, '_blank');
+        }
+        triggerToast('Janela oficial de Login da Meta aberta.', 'info');
+      } else {
+        triggerToast(data.detail || 'Erro ao gerar link de login da Meta.', 'error');
+      }
+    } catch (e) {
+      console.error(e);
+      triggerToast('Erro de conexão ao iniciar login com a Meta.', 'error');
+    }
+  };
 
   const handleStartNewProfileInstagramLogin = async () => {
     if (!isElectron || !window.electronAPI?.startExternalInstagramLogin) {
@@ -936,6 +995,16 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
 
           <button
             type="button"
+            className="bg-gradient-to-r from-[#0084FF] to-[#00C6FF] hover:opacity-95 text-white h-10 px-4 rounded-full text-xs font-semibold flex items-center justify-center gap-1.5 transition-all shadow-[0_4px_14px_rgba(0,132,255,0.25)] hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
+            onClick={handleStartMetaOAuthLogin}
+            title="Conectar contas do Instagram via API Oficial da Meta"
+          >
+            <span className="material-symbols-outlined text-[18px]">verified</span>
+            Conectar com a Meta
+          </button>
+
+          <button
+            type="button"
             className="bg-[#0071E3] hover:bg-[#005CBB] text-white h-10 px-5 rounded-full text-xs font-semibold flex items-center justify-center gap-1.5 transition-all shadow-[0_4px_14px_rgba(0,113,227,0.25)] hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
             onClick={() => setIsCreateModalOpen(true)}
           >
@@ -1117,12 +1186,17 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
                   <div className="min-w-0">
                     <div className="text-xs font-bold text-[#1D1D1F] truncate flex items-center gap-1.5">
                       <span className="truncate">{acc.display_name || acc.username}</span>
-                      {acc.has_official_token && (
-                        <span className="inline-flex items-center gap-0.5 rounded-full bg-[#ECFDF5] px-1.5 py-0.5 text-[9px] font-bold text-[#059669] border border-[#A7F3D0] shrink-0" title="Conectado via Instagram Login (API Oficial)">
-                          <span className="material-symbols-outlined text-[10px]">verified</span>
-                          API
+                      {acc.revoked ? (
+                        <span className="inline-flex items-center gap-0.5 rounded-full bg-[#FEF2F2] px-1.5 py-0.5 text-[9px] font-bold text-[#DC2626] border border-[#FCA5A5] shrink-0" title="Acesso desautorizado na Meta. Clique em Conectar com a Meta para reativar.">
+                          <span className="material-symbols-outlined text-[10px]">warning</span>
+                          Desautorizado
                         </span>
-                      )}
+                      ) : (acc.has_official_token || acc.auth_mode === 'official') ? (
+                        <span className="inline-flex items-center gap-0.5 rounded-full bg-[#ECFDF5] px-1.5 py-0.5 text-[9px] font-bold text-[#059669] border border-[#A7F3D0] shrink-0" title={`Conectado via API Oficial da Meta ${acc.token_expires_at ? `(expira em ${new Date(acc.token_expires_at).toLocaleDateString('pt-BR')})` : ''}`}>
+                          <span className="material-symbols-outlined text-[10px]">verified</span>
+                          Meta Oficial
+                        </span>
+                      ) : null}
                     </div>
                     <div className="text-[11px] font-normal text-[#86868B] truncate">
                       @{acc.display_name || acc.username}
@@ -1388,6 +1462,26 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
             {/* Modal Body (Scrollable) */}
             <main className="p-6 overflow-y-auto space-y-5 flex-1 custom-scrollbar bg-[#FAFAFC]">
               
+              {/* Banner API Oficial da Meta */}
+              <div className="p-4 bg-gradient-to-r from-[#0084FF]/10 to-[#00C6FF]/10 border border-[#0084FF]/30 rounded-2xl flex items-center justify-between gap-3 shadow-xs">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-[#0084FF] text-white flex items-center justify-center shrink-0 shadow-sm">
+                    <span className="material-symbols-outlined text-[22px]">verified</span>
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-[#1D1D1F]">Conectar Conta Oficial da Meta</h4>
+                    <p className="text-[11px] text-[#86868B] mt-0.5">Conecte via Facebook OAuth oficial. Sem necessidade de proxy ou senha.</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { closeCreateProfile(); handleStartMetaOAuthLogin(); }}
+                  className="px-3.5 py-2 rounded-xl bg-[#0084FF] hover:bg-[#0073E6] text-white text-xs font-bold transition-all shadow-xs shrink-0 cursor-pointer"
+                >
+                  Conectar Meta
+                </button>
+              </div>
+
               <form id="create-profile-form" onSubmit={handleCreateAccount} className="space-y-5">
                 
                 {/* Seção 1: Informações Gerais */}

@@ -14,6 +14,58 @@ const { chromeUA, configureChromeSession } = require('./browser-identity')
 // apareça corretamente na barra de tarefas (Taskbar).
 app.setAppUserModelId('com.viraldog.desktop')
 
+// ── Registro de Protocolo Deep Link (viraldog://) ───────────────────────────
+if (process.defaultApp) {
+  if (process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient('viraldog', process.execPath, [path.resolve(process.argv[1])])
+  }
+} else {
+  app.setAsDefaultProtocolClient('viraldog')
+}
+
+// Single instance lock para deep linking
+const gotTheLock = app.requestSingleInstanceLock()
+if (!gotTheLock) {
+  app.quit()
+} else {
+  app.on('second-instance', (event, commandLine) => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.focus()
+
+      const urlArg = commandLine.find(arg => arg.startsWith('viraldog://'))
+      if (urlArg) {
+        handleDeepLinkUrl(urlArg)
+      }
+    }
+  })
+}
+
+function handleDeepLinkUrl(urlStr) {
+  try {
+    console.log('[DeepLink] Recebido:', urlStr)
+    // Se a URL contiver code de autorização, despachar também para o backend local
+    if (urlStr.includes('code=')) {
+      const qs = urlStr.includes('?') ? urlStr.split('?')[1] : urlStr.replace(/^viraldog:\/\/auth\/callback\??/, '')
+      if (qs) {
+        http.get(`http://127.0.0.1:8000/auth/callback?${qs}`, (res) => {
+          console.log('[Electron OAuth] Callback despachado ao backend local, status:', res.statusCode)
+        }).on('error', (err) => console.error('[Electron OAuth] Erro ao despachar callback local:', err.message))
+      }
+    }
+    if (mainWindow && mainWindow.webContents) {
+      mainWindow.webContents.send('meta-oauth-complete', { url: urlStr })
+    }
+  } catch (e) {
+    console.error('[DeepLink] Erro:', e)
+  }
+}
+
+app.on('open-url', (event, urlStr) => {
+  event.preventDefault()
+  handleDeepLinkUrl(urlStr)
+})
+
 // ── Flags de estabilidade do Chromium (antes de app.whenReady) ────────────
 // Roda o Network Service DENTRO do processo principal (evita "Utility killed")
 app.commandLine.appendSwitch('enable-features', 'NetworkServiceInProcess2')
@@ -76,6 +128,7 @@ function startPythonBackend() {
     // Dev: uvicorn via venv
     exe = path.join(__dirname, '../backend/venv/Scripts/python.exe')
     args = ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', '8000']
+    cwd = path.join(__dirname, '../backend')
   }
   const env = { ...process.env }
   if (app.isPackaged) {
@@ -315,6 +368,38 @@ async function createWindow() {
       webSecurity: false,
       preload: path.join(__dirname, 'preload.js')
     }
+  })
+
+  // Gerenciar popups de login (Meta OAuth) e fechar automaticamente após callback
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    return {
+      action: 'allow',
+      overrideBrowserWindowOptions: {
+        width: 620,
+        height: 740,
+        autoHideMenuBar: true,
+        webPreferences: {
+          nodeIntegration: false,
+          contextIsolation: true
+        }
+      }
+    }
+  })
+
+  mainWindow.webContents.on('did-create-window', (childWindow) => {
+    const checkAndIntercept = (targetUrl) => {
+      if (!targetUrl) return
+      if (targetUrl.includes('/auth/callback') || targetUrl.startsWith('viraldog://')) {
+        console.log('[Electron OAuth Popup] Callback detectado:', targetUrl)
+        handleDeepLinkUrl(targetUrl)
+        setTimeout(() => {
+          try { childWindow.close() } catch {}
+        }, 1200)
+      }
+    }
+    childWindow.webContents.on('will-navigate', (e, u) => checkAndIntercept(u))
+    childWindow.webContents.on('will-redirect', (e, u) => checkAndIntercept(u))
+    childWindow.webContents.on('did-navigate', (e, u) => checkAndIntercept(u))
   })
 
   mainWindow.maximize()

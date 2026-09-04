@@ -80,13 +80,34 @@ class Account(Base):
     auth_mode = Column(String, default="cookie")  # "official" (OAuth Instagram Login) or "cookie" (instagrapi/web session)
     instagram_user_id = Column(String, nullable=True)  # Instagram Login App-Scoped User ID (IG User ID)
     
+    # Official Meta Graph API fields
+    owner_user_id = Column(String, default="default", nullable=True)
+    ig_user_id = Column(String, nullable=True)  # ID da conta Instagram profissional
+    ig_username = Column(String, nullable=True)  # @ da conta oficial
+    fb_page_id = Column(String, nullable=True)  # ID da Página do Facebook vinculada
+    fb_page_name = Column(String, nullable=True)  # Nome da Página do Facebook
+    access_token = Column(Text, nullable=True)  # Token da página oficial
+    connected_at = Column(DateTime, default=datetime.utcnow)
+    revoked = Column(Boolean, default=False)  # True se usuário revogou permissão na Meta
+    
     # Relationships
     profile = relationship("AccountProfile", back_populates="account", uselist=False)
+
+class User(Base):
+    __tablename__ = "users"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    password_hash = Column(String, nullable=False)
+    name = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class Post(Base):
     __tablename__ = "posts"
     
     id = Column(Integer, primary_key=True, index=True)
+    owner_user_id = Column(String, default="default", index=True, nullable=True)
     original_url = Column(String, nullable=True)
     video_path = Column(String, nullable=False)
     caption = Column(Text, nullable=True)
@@ -95,6 +116,8 @@ class Post(Base):
     ig_media_id = Column(String, nullable=True)
     error_message = Column(Text, nullable=True)
     account_username = Column(String, nullable=True)
+    ig_user_id = Column(String, nullable=True)  # Vínculo direto com a conta oficial do Instagram
+    published_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     # New fields
     post_type = Column(String, default="reel")  # reel, carousel, story
@@ -104,6 +127,7 @@ class Post(Base):
     engagement_score = Column(Float, nullable=True)
     # Carousel-specific
     carousel_image_paths = Column(Text, nullable=True)  # JSON array of image paths
+    meta_container_id = Column(String, nullable=True)
 class Config(Base):
     __tablename__ = "configs"
     
@@ -236,6 +260,14 @@ def init_db():
                 "token_expires_at": "DATETIME",
                 "auth_mode": "VARCHAR DEFAULT 'cookie'",
                 "instagram_user_id": "VARCHAR",
+                "owner_user_id": "VARCHAR DEFAULT 'default'",
+                "ig_user_id": "VARCHAR",
+                "ig_username": "VARCHAR",
+                "fb_page_id": "VARCHAR",
+                "fb_page_name": "VARCHAR",
+                "access_token": "TEXT",
+                "connected_at": "DATETIME",
+                "revoked": "BOOLEAN DEFAULT 0",
             }
             for col, col_type in new_accounts_cols.items():
                 if col not in accounts_cols:
@@ -251,7 +283,10 @@ def init_db():
                 "cross_post_targets": "TEXT",
                 "engagement_score": "FLOAT",
                 "carousel_image_paths": "TEXT",
-                "meta_container_id": "VARCHAR"
+                "meta_container_id": "VARCHAR",
+                "ig_user_id": "VARCHAR",
+                "published_at": "DATETIME",
+                "owner_user_id": "VARCHAR DEFAULT 'default'"
             }
             for col, col_type in new_posts_cols.items():
                 if col not in posts_cols:
@@ -290,7 +325,14 @@ def init_db():
             "analytics_collect_interval_hours": "6",
             "meta_app_id": "1640190021019907",
             "meta_app_secret": "",
+            "meta_redirect_uri": "",
             "public_media_base_url": "",
+            "s3_endpoint_url": "",
+            "s3_bucket_name": "",
+            "s3_access_key": "",
+            "s3_secret_key": "",
+            "s3_public_base_url": "",
+            "vary_captions_ai": "false",
         }
         
         # Expunge removed configs
