@@ -68,6 +68,22 @@ export default function CropModal({ job, template, onClose, onSave, musicOverlay
     }
   }, [isPlaying, musicOverlay?.enabled, musicOverlay?.objectUrl]);
 
+  useEffect(() => {
+    const handleGlobalPause = () => {
+      setIsPlaying(false);
+      if (videoRef.current && !videoRef.current.paused) {
+        videoRef.current.pause();
+      }
+      if (bgmRef.current && !bgmRef.current.paused) {
+        bgmRef.current.pause();
+      }
+    };
+    window.addEventListener('viraldog:pause-all-media', handleGlobalPause);
+    return () => {
+      window.removeEventListener('viraldog:pause-all-media', handleGlobalPause);
+    };
+  }, []);
+
   // Sync background music on seek/timeupdate
   useEffect(() => {
     if (bgmRef.current && videoRef.current && isPlaying && musicOverlay?.enabled && musicOverlay?.objectUrl) {
@@ -660,6 +676,8 @@ export default function CropModal({ job, template, onClose, onSave, musicOverlay
                   muted={isMuted}
                   playsInline
                   autoPlay={isPlaying}
+                  onPlay={() => setIsPlaying(true)}
+                  onPause={() => setIsPlaying(false)}
                   onTimeUpdate={handleTimeUpdate}
                   onLoadedMetadata={handleLoadedMetadata}
                   className="absolute max-w-none max-h-none pointer-events-none"

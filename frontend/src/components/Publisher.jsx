@@ -1,16 +1,13 @@
 import React from 'react';
 import usePublisher from './publisher/usePublisher';
-import PostForm from './publisher/PostForm';
 import PublisherCalendar from './publisher/PublisherCalendar';
-import PostList from './publisher/PostList';
-import RepostPanel from './publisher/RepostPanel';
-import DashboardMetrics from './publisher/DashboardMetrics';
+import ConnectedAccountsTab from './publisher/ConnectedAccountsTab';
 import BulkScheduleModal from './publisher/BulkScheduleModal';
 import ConfirmModal from './ConfirmModal';
 
 export default function Publisher({ triggerToast }) {
   const pubState = usePublisher(triggerToast);
-  const { activeSubTab, setActiveSubTab, creationWizardOpen, setCreationWizardOpen, wizardStep, setWizardStep, bulkModalOpen, setBulkModalOpen } = pubState;
+  const { bulkModalOpen, setBulkModalOpen, bulkModalInitialDate } = pubState;
 
   const deleteModalDetails = pubState.deleteModalPost ? {
     title: pubState.deleteModalPost.video_path
@@ -30,59 +27,25 @@ export default function Publisher({ triggerToast }) {
   } : null;
 
   return (
-    <div className={`w-full flex flex-col fade-in h-full relative ${creationWizardOpen ? '' : 'gap-6'}`}>
-      {/* Header — hidden during wizard so PostForm fills full height */}
-      {!creationWizardOpen && (
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-4 shrink-0">
-          <div>
-            <h1 className="text-xl font-bold text-text-primary tracking-tight">Publisher Inteligente</h1>
-            <p className="text-xs text-text-secondary mt-1">
-              Agende, analise e gerencie suas publicações
-            </p>
-          </div>
-
-          {/* Navigation Tabs */}
-          <div className="flex items-center gap-1.5 p-1.5 bg-surface-off-white rounded-xl border border-outline-variant/20 shadow-xs self-stretch md:self-auto overflow-x-auto custom-scrollbar no-scrollbar-y">
-            {[
-              { id: 'calendar', label: 'Calendário', icon: 'calendar_today' },
-              { id: 'my-posts', label: 'Meus Posts', icon: 'grid_on' },
-              { id: 'approvals', label: 'Grupos e Reposts', icon: 'rule_folder' },
-              { id: 'dashboard', label: 'Dashboard', icon: 'donut_large' }
-            ].map(tab => (
-              <button
-                key={tab.id}
-                onClick={() => { setActiveSubTab(tab.id); setCreationWizardOpen(false); setWizardStep(1); }}
-                className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-all duration-200 flex items-center gap-2 whitespace-nowrap ${
-                  activeSubTab === tab.id && !creationWizardOpen
-                    ? 'bg-surface-white text-[#0071E3] shadow-sm'
-                    : 'text-[#86868B] hover:text-[#1D1D1F]'
-                }`}
-              >
-                <span className="material-symbols-outlined text-[16px]">{tab.icon}</span>
-                {tab.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Main Content Area */}
-      <div className={`flex-1 min-h-0 ${creationWizardOpen || activeSubTab === 'calendar' ? 'overflow-hidden flex flex-col' : 'overflow-y-auto custom-scrollbar pb-6'}`}>
-        {creationWizardOpen ? (
-          <PostForm pubState={pubState} triggerToast={triggerToast} />
-        ) : (
-          <>
-            {activeSubTab === 'calendar' && <PublisherCalendar pubState={pubState} />}
-            {activeSubTab === 'my-posts' && <PostList pubState={pubState} />}
-            {activeSubTab === 'approvals' && <RepostPanel pubState={pubState} />}
-            {activeSubTab === 'dashboard' && <DashboardMetrics pubState={pubState} />}
-          </>
-        )}
+    <div className="w-full flex flex-col fade-in h-full relative gap-4">
+      {/* Main Content Area — Calendário sempre visível */}
+      <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+        <PublisherCalendar pubState={pubState} />
       </div>
 
-      {/* Bulk Schedule Modal */}
+      {/* Modal de Perfis Conectados */}
+      <ConnectedAccountsTab
+        isModal={true}
+        isOpen={pubState.accountsModalOpen}
+        onClose={() => pubState.setAccountsModalOpen(false)}
+        pubState={pubState}
+        triggerToast={triggerToast}
+      />
+
+      {/* Modal de Agendamento em Sobreposição (Lote e Individual) */}
       <BulkScheduleModal
         isOpen={bulkModalOpen}
+        initialDate={bulkModalInitialDate}
         onClose={() => setBulkModalOpen(false)}
         accounts={pubState.accounts}
         triggerToast={triggerToast}

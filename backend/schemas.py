@@ -3,6 +3,18 @@ from typing import List, Optional, Dict
 from pydantic import BaseModel, Field
 
 
+class AccountCreate(BaseModel):
+    username: str
+    proxy_url: Optional[str] = None
+    folder: Optional[str] = "Geral"
+    notes: Optional[str] = None
+    tags: Optional[str] = None
+    platform: Optional[str] = "instagram"
+    fingerprint_json: Optional[str] = None
+    warmup_config_json: Optional[str] = None
+    extensions_config_json: Optional[str] = None
+
+
 class CookieAccountCreate(BaseModel):
     username: str
     cookies_json: Optional[str] = None
@@ -26,6 +38,30 @@ class AccountPatchRequest(BaseModel):
     fb_access_token: Optional[str] = None
     fb_ig_account_id: Optional[str] = None
     instagram_user_id: Optional[str] = None
+    fingerprint_json: Optional[str] = None
+    warmup_config_json: Optional[str] = None
+    last_warmup_at: Optional[str] = None
+    warmup_history_json: Optional[str] = None
+    extensions_config_json: Optional[str] = None
+
+class ExtensionToggleRequest(BaseModel):
+    extension_id: str
+    enabled: bool
+
+class WarmupStartRequest(BaseModel):
+    mode: Optional[str] = "headless"  # "headless" (silencioso) ou "windowed" (janela visível)
+    feed_minutes: Optional[int] = 3
+    stories_count: Optional[int] = 5
+    likes_count: Optional[int] = 3
+    hashtags: Optional[List[str]] = None
+
+class WarmupBulkRequest(BaseModel):
+    account_ids: List[int]
+    mode: Optional[str] = "headless"
+    feed_minutes: Optional[int] = 3
+    stories_count: Optional[int] = 5
+    likes_count: Optional[int] = 3
+    hashtags: Optional[List[str]] = None
 
 class DownloadSingleRequest(BaseModel):
     url: str
@@ -142,12 +178,17 @@ class SchedulePostRequest(BaseModel):
     post_type: str = "reel"
     carousel_image_paths: Optional[List[str]] = None
 
+class ReschedulePostRequest(BaseModel):
+    scheduled_time: str
+
 class BulkScheduleItem(BaseModel):
     video_path: str
     caption: str
     scheduled_time: str
     account_username: Optional[str] = None
     post_type: str = "reel"
+    carousel_image_paths: Optional[List[str]] = None
+
 
 class BulkScheduleRequest(BaseModel):
     posts: List[BulkScheduleItem]

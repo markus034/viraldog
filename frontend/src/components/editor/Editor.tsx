@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Film, Settings, RefreshCw, FlipHorizontal, Type, Image as ImageIcon, Music, Save, PanelTop, AlignLeft, AlignCenter, AlignRight, ChevronDown, RotateCcw, MoreHorizontal, Trash2 } from 'lucide-react';
+import { Film, Settings, RefreshCw, FlipHorizontal, Type, Image as ImageIcon, Music, Save, PanelTop, AlignLeft, AlignCenter, AlignRight, ChevronDown, RotateCcw, MoreHorizontal, Trash2, Zap, CheckCircle2 } from 'lucide-react';
 import { API_BASE_URL } from '../../config';
 import { VideoJob, TemplateConfig, BoundingBox, TextOverlayConfig, ImageOverlayConfig } from './types';
 import TemplateCard from './components/TemplateCard';
@@ -57,6 +57,19 @@ export default function Editor({ triggerToast }: EditorProps) {
 
   const [jobs, setJobs] = useState<VideoJob[]>([]);
   const [calibratingJob, setCalibratingJob] = useState<VideoJob | null>(null);
+  const [batchSavingState, setBatchSavingState] = useState<{
+    active: boolean;
+    total: number;
+    completed: number;
+    failed: number;
+    inProgress: number;
+  }>({
+    active: false,
+    total: 0,
+    completed: 0,
+    failed: 0,
+    inProgress: 0,
+  });
 
   const [antiDuplicity, setAntiDuplicity] = useState({
     enabled: true,
@@ -319,6 +332,7 @@ export default function Editor({ triggerToast }: EditorProps) {
   // handleSave: saves a single video via backend FFmpeg composition
   // ---------------------------------------------------------------------------
   const handleSave = async (job: VideoJob) => {
+    let interval: any = null;
     try {
       setJobs((prev) =>
         prev.map((j) =>
@@ -330,16 +344,16 @@ export default function Editor({ triggerToast }: EditorProps) {
 
       // Deceleration curve simulated progress (5% to 95%) while backend works
       let currentProgress = 5;
-      const interval = setInterval(() => {
-        currentProgress += (95 - currentProgress) * 0.12;
+      interval = setInterval(() => {
+        currentProgress += (95 - currentProgress) * 0.15;
         setJobs((prev) =>
           prev.map((j) =>
             j.id === job.id
-              ? { ...j, progress: Math.round(currentProgress), details: 'Processando vídeo no servidor via FFmpeg...' }
+              ? { ...j, progress: Math.min(96, Math.round(currentProgress)), details: 'Renderizando com FFmpeg acelerado...' }
               : j
           )
         );
-      }, 700);
+      }, 500);
 
       const activeBbox = job.manualBbox ?? job.detectedBbox;
       const keepTitleEnabled = job.keepTitle ?? keepTitle.enabled;
@@ -420,7 +434,7 @@ export default function Editor({ triggerToast }: EditorProps) {
         body: formData,
       });
 
-      clearInterval(interval);
+      if (interval) clearInterval(interval);
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: 'Erro desconhecido' }));
@@ -429,8 +443,6 @@ export default function Editor({ triggerToast }: EditorProps) {
 
       const result = await res.json();
 
-      triggerToast(`Vídeo salvo com sucesso: ${result.filename}`, 'success');
-
       setJobs((prev) =>
         prev.map((j) =>
           j.id === job.id
@@ -438,8 +450,10 @@ export default function Editor({ triggerToast }: EditorProps) {
             : j
         )
       );
+
+      return result;
     } catch (err: any) {
-      triggerToast('Erro: ' + err.message, 'error');
+      if (interval) clearInterval(interval);
       setJobs((prev) =>
         prev.map((j) =>
           j.id === job.id
@@ -452,26 +466,94 @@ export default function Editor({ triggerToast }: EditorProps) {
   };
 
   // ---------------------------------------------------------------------------
-  // handleSaveAll: saves all ready videos sequentially
+  // handleSaveWithRetry: retry helper for transient errors
+  // ---------------------------------------------------------------------------
+  const handleSaveWithRetry = async (job: VideoJob, maxRetries = 1): Promise<any> => {
+    let lastErr: any = null;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await handleSave(job);
+      } catch (err: any) {
+        lastErr = err;
+        if (attempt < maxRetries) {
+          await new Promise((res) => setTimeout(res, 800));
+        }
+      }
+    }
+    throw lastErr;
+  };
+
+  // ---------------------------------------------------------------------------
+  // handleSaveAll: saves ready/pending videos concurrently with a pool of up to 10
   // ---------------------------------------------------------------------------
   const handleSaveAll = async () => {
-    const candidates = jobs.filter((j) => j.status !== 'detectando' && j.status !== 'falhou');
-    if (candidates.length === 0) {
-      triggerToast('Nenhum vídeo disponível para salvar.', 'error');
+    if (batchSavingState.active) {
+      triggerToast('Renderização em lote já está em andamento.', 'warning');
       return;
     }
 
-    triggerToast(`Iniciando processamento em lote de ${candidates.length} vídeo(s)...`, 'info');
-
-    for (const job of candidates) {
-      try {
-        await handleSave(job);
-      } catch (err) {
-        console.error(`Falha ao processar job ${job.name}:`, err);
-      }
+    const candidates = jobs.filter((j) => j.status !== 'detectando' && j.status !== 'salvando' && j.status !== 'salvo');
+    if (candidates.length === 0) {
+      triggerToast('Nenhum vídeo pendente para salvar.', 'info');
+      return;
     }
 
-    triggerToast('Lote processado por completo!', 'success');
+    const CONCURRENCY_LIMIT = 10;
+    const poolSize = Math.min(CONCURRENCY_LIMIT, candidates.length);
+    triggerToast(`Iniciando renderização de ${candidates.length} vídeo(s) (${poolSize} simultâneos)...`, 'info');
+
+    setBatchSavingState({
+      active: true,
+      total: candidates.length,
+      completed: 0,
+      failed: 0,
+      inProgress: poolSize,
+    });
+
+    let queueIndex = 0;
+    let completedCount = 0;
+    let failedCount = 0;
+    let activeWorkers = 0;
+
+    const runWorker = async (): Promise<void> => {
+      while (queueIndex < candidates.length) {
+        const currentIndex = queueIndex++;
+        const currentJob = candidates[currentIndex];
+        activeWorkers++;
+        setBatchSavingState((prev) => ({ ...prev, inProgress: activeWorkers }));
+
+        try {
+          await handleSaveWithRetry(currentJob, 1);
+          completedCount++;
+        } catch (err) {
+          failedCount++;
+          console.error(`Falha ao salvar ${currentJob.name}:`, err);
+        } finally {
+          activeWorkers--;
+          setBatchSavingState((prev) => ({
+            ...prev,
+            completed: completedCount,
+            failed: failedCount,
+            inProgress: activeWorkers,
+          }));
+        }
+      }
+    };
+
+    const workers: Promise<void>[] = [];
+    for (let i = 0; i < poolSize; i++) {
+      workers.push(runWorker());
+    }
+
+    await Promise.all(workers);
+
+    setBatchSavingState((prev) => ({ ...prev, active: false, inProgress: 0 }));
+
+    if (failedCount === 0) {
+      triggerToast(`Todos os ${completedCount} vídeos foram salvos com sucesso!`, 'success');
+    } else {
+      triggerToast(`Lote finalizado: ${completedCount} salvos, ${failedCount} com erro.`, 'warning');
+    }
   };
 
   const generateNextVideoName = (templateFileName: string): string => {
@@ -1464,20 +1546,39 @@ export default function Editor({ triggerToast }: EditorProps) {
               </div>
             </div>
 
-            {renderizandoJobs > 0 && (
-              <div className="w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-[#E8E8ED] text-[#86868B] text-xs font-bold tracking-widest uppercase">
-                <RefreshCw className="w-4 h-4 animate-spin" />
-                Renderizando {renderizandoJobs} vídeo{renderizandoJobs > 1 ? 's' : ''}...
+            {batchSavingState.active ? (
+              <div className="w-full flex flex-col gap-2 p-3.5 rounded-xl bg-gradient-to-br from-[#0071E3]/10 via-emerald-500/10 to-transparent border border-[#0071E3]/20 text-[#1D1D1F]">
+                <div className="flex items-center justify-between text-xs font-bold">
+                  <span className="flex items-center gap-1.5 text-[#0071E3]">
+                    <Zap className="w-4 h-4 animate-pulse fill-[#0071E3]" />
+                    Renderização 10x
+                  </span>
+                  <span className="font-mono text-emerald-600">
+                    {batchSavingState.completed}/{batchSavingState.total}
+                  </span>
+                </div>
+                <div className="w-full bg-black/5 h-2 rounded-full overflow-hidden">
+                  <div
+                    className="bg-gradient-to-r from-[#0071E3] to-emerald-500 h-full rounded-full transition-all duration-300 shadow-sm"
+                    style={{
+                      width: `${batchSavingState.total > 0 ? Math.round((batchSavingState.completed / batchSavingState.total) * 100) : 0}%`,
+                    }}
+                  />
+                </div>
+                <p className="text-[10px] text-[#86868B] font-mono">
+                  {batchSavingState.inProgress} vídeo(s) sendo gerados em paralelo...
+                </p>
               </div>
-            )}
-
-            {completedJobs > 0 && (
-              <button
-                onClick={handleSaveAll}
-                className="w-full flex items-center justify-center gap-2 py-3 rounded-lg text-xs font-bold tracking-widest uppercase transition-all duration-300 border border-[#0071E3] text-[#0071E3] hover:bg-[#0071E3]/5 bg-white transform hover:-translate-y-0.5 active:translate-y-0 cursor-pointer shadow-sm">
-                <Save className="w-4 h-4" />
-                Salvar Todos os Vídeos ({completedJobs})
-              </button>
+            ) : (
+              completedJobs > 0 && (
+                <button
+                  onClick={handleSaveAll}
+                  disabled={batchSavingState.active}
+                  className="w-full flex items-center justify-center gap-2 py-3 rounded-lg text-xs font-bold tracking-widest uppercase transition-all duration-300 border border-[#0071E3] text-[#0071E3] hover:bg-[#0071E3]/5 bg-white transform hover:-translate-y-0.5 active:translate-y-0 cursor-pointer shadow-sm disabled:opacity-50 disabled:cursor-not-allowed">
+                  <Zap className="w-4 h-4 text-[#0071E3] fill-[#0071E3]/20" />
+                  Salvar Todos os Vídeos ({completedJobs})
+                </button>
+              )
             )}
           </div>
 
@@ -1485,6 +1586,41 @@ export default function Editor({ triggerToast }: EditorProps) {
 
         {/* Right Section: Video Lot Management Console */}
         <div className="flex-grow flex flex-col gap-4 min-w-0">
+          {batchSavingState.active && (
+            <div className="apple-card rounded-2xl p-4 bg-white border border-[#0071E3]/30 shadow-md flex items-center justify-between gap-4 animate-in fade-in slide-in-from-top-2 duration-300">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-[#0071E3]/10 text-[#0071E3] flex items-center justify-center shrink-0">
+                  <Zap className="w-5 h-5 animate-bounce fill-[#0071E3]" />
+                </div>
+                <div>
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-[#1D1D1F] flex items-center gap-2">
+                    Processando em Lote de Alta Performance
+                    <span className="px-2 py-0.5 rounded-full text-[9px] bg-emerald-100 text-emerald-700 font-mono">
+                      Até 10 simultâneos
+                    </span>
+                  </h3>
+                  <p className="text-[11px] text-[#86868B] mt-0.5">
+                    {batchSavingState.inProgress} renderizando agora • {batchSavingState.completed} de {batchSavingState.total} concluídos
+                    {batchSavingState.failed > 0 && ` • ${batchSavingState.failed} com erro`}
+                  </p>
+                </div>
+              </div>
+              <div className="w-36 hidden sm:flex flex-col items-end gap-1 shrink-0">
+                <span className="text-xs font-mono font-bold text-[#0071E3]">
+                  {batchSavingState.total > 0 ? Math.round((batchSavingState.completed / batchSavingState.total) * 100) : 0}%
+                </span>
+                <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+                  <div
+                    className="bg-gradient-to-r from-[#0071E3] to-emerald-500 h-full rounded-full transition-all duration-300"
+                    style={{
+                      width: `${batchSavingState.total > 0 ? Math.round((batchSavingState.completed / batchSavingState.total) * 100) : 0}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="flex items-center justify-between">
             <div>
               <h2 className="font-semibold text-xs tracking-[0.2em] text-[#86868B] uppercase flex items-center gap-2">
@@ -1492,7 +1628,7 @@ export default function Editor({ triggerToast }: EditorProps) {
                 Lote de Processamento ({jobs.length} vídeos)
               </h2>
               <p className="text-[11px] text-[#86868B] mt-1">
-                Os vídeos são renderizados automaticamente. Após concluir, clique em Salvar.
+                Os vídeos são renderizados em lote ultra-rápido. Você pode salvar individualmente ou clicar em Salvar Todos.
               </p>
             </div>
           </div>

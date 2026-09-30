@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: viraldog-cloud-worker
+    runtime: docker
+    dockerfilePath: cloud_worker/Dockerfile
+    dockerContext: cloud_worker
+    plan: free
+    region: ohio
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: WORKER_SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        value: sqlite:///./worker.db

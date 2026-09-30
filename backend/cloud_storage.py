@@ -42,8 +42,14 @@ def _get_config_val(db: Optional[Session], key: str, default: str = "") -> str:
 
 def get_s3_client(db: Optional[Session] = None, custom_config: Optional[dict] = None):
     """Creates a boto3 S3 client using database configs or custom config dict."""
+    global BOTO3_AVAILABLE, boto3, BotoConfig
     if not BOTO3_AVAILABLE:
-        raise RuntimeError("Biblioteca 'boto3' não está disponível no ambiente.")
+        try:
+            import boto3
+            from botocore.config import Config as BotoConfig
+            BOTO3_AVAILABLE = True
+        except ImportError:
+            raise RuntimeError("Biblioteca 'boto3' não está disponível no ambiente.")
 
     cfg = custom_config or {}
     endpoint_url = cfg.get("s3_endpoint_url") or _get_config_val(db, "s3_endpoint_url")

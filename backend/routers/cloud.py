@@ -151,3 +151,31 @@ async def upload_video_to_cloud(
         "size_bytes": file_size,
         "url": f"/uploads/{unique_filename}"
     }
+
+
+@router.post("/test-worker")
+def test_cloud_worker(data: dict):
+    """Test connection and secret auth to a 24/7 Cloud Worker."""
+    url = data.get("worker_url", "")
+    secret = data.get("worker_secret", "")
+    import cloud_worker_client
+    return cloud_worker_client.test_cloud_worker_connection(url, secret)
+
+
+@router.get("/worker-status")
+def get_cloud_worker_status(db: Session = Depends(get_db)):
+    """Returns whether Cloud Worker and Cloud Storage are configured for PC-off scheduling."""
+    import cloud_worker_client
+    import cloud_storage
+    worker_url = cloud_worker_client._get_cfg(db, "cloud_worker_url")
+    worker_secret = cloud_worker_client._get_cfg(db, "cloud_worker_secret")
+    storage_configured = cloud_storage.is_storage_configured(db)
+    is_ready = bool(worker_url and worker_secret and storage_configured)
+    return {
+        "is_configured": is_ready,
+        "worker_url": worker_url,
+        "has_secret": bool(worker_secret),
+        "storage_configured": storage_configured,
+        "mode": "cloud_autonomous" if is_ready else "local_only"
+    }
+

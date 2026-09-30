@@ -21,6 +21,8 @@ export default function usePublisher(triggerToast) {
   const [creationWizardOpen, setCreationWizardOpen] = useState(false);
   const [wizardStep, setWizardStep] = useState(1);
   const [bulkModalOpen, setBulkModalOpen] = useState(false);
+  const [bulkModalInitialDate, setBulkModalInitialDate] = useState(null);
+  const [accountsModalOpen, setAccountsModalOpen] = useState(false);
   const [deleteModalPost, setDeleteModalPost] = useState(null);
   const [isDeletingSchedule, setIsDeletingSchedule] = useState(false);
   const [presetsDropdownOpen, setPresetsDropdownOpen] = useState(false);
@@ -97,15 +99,22 @@ export default function usePublisher(triggerToast) {
       const res = await fetch(`${API}/api/accounts`);
       if (res.ok) {
         const data = await res.json();
-        setAccounts(data);
-        if (data.length > 0) {
+        // O Agendador utiliza estritamente contas oficiais conectadas via Meta Graph API
+        const official = (Array.isArray(data) ? data : []).filter(
+          a => a.auth_mode === 'official_api' || a.has_official_token || a.fb_ig_account_id
+        );
+        const listToUse = official;
+        setAccounts(listToUse);
+        if (listToUse.length > 0) {
           setSelectedAccount(prev => {
-            if (!prev) return data[0].username;
-            const exists = data.some(a => a.username === prev);
+            if (!prev) return listToUse[0].username;
+            const exists = listToUse.some(a => a.username === prev);
             if (exists) return prev;
-            const matchedByName = data.find(a => a.display_name === prev);
-            return matchedByName ? matchedByName.username : data[0].username;
+            const matchedByName = listToUse.find(a => a.display_name === prev);
+            return matchedByName ? matchedByName.username : listToUse[0].username;
           });
+        } else {
+          setSelectedAccount('');
         }
       }
     } catch (e) { console.error(e); }
@@ -152,19 +161,21 @@ export default function usePublisher(triggerToast) {
   }, [creationWizardOpen, fetchAccounts]);
 
   useEffect(() => {
+    let lastSync = 0;
     const handleSync = () => {
+      const now = Date.now();
+      if (now - lastSync < 3000) return;
+      lastSync = now;
       fetchAccounts();
       fetchScheduledPosts();
     };
 
     window.addEventListener('focus', handleSync);
     window.addEventListener('viraldog:accounts-updated', handleSync);
-    document.addEventListener('visibilitychange', handleSync);
 
     return () => {
       window.removeEventListener('focus', handleSync);
       window.removeEventListener('viraldog:accounts-updated', handleSync);
-      document.removeEventListener('visibilitychange', handleSync);
     };
   }, [fetchAccounts, fetchScheduledPosts]);
 
@@ -176,31 +187,32 @@ export default function usePublisher(triggerToast) {
 
     const interval = setInterval(() => {
       fetchAccounts();
-    }, 2500);
+    }, 5000);
 
     return () => clearInterval(interval);
   }, [creationWizardOpen, selectedAccount, accounts, fetchAccounts]);
 
   const scanFolderVideos = async (path) => {
-    if (!path) {
+    if (!path || !path.trim()) {
       fetchVideos();
       return;
     }
     setLoadingFolder(true);
     try {
-      const res = await fetch(`${API}/api/videos/scan-folder?path=${encodeURIComponent(path)}`);
+      const res = await fetch(`${API}/api/videos/scan-folder?path=${encodeURIComponent(path.trim())}`);
       if (res.ok) {
         const data = await res.json();
-        const formatted = data.map(v => ({
+        const formatted = (Array.isArray(data) ? data : []).map(v => ({
           name: v.name, path: v.path, size: v.size,
-          category: 'folder', created_at: v.created_at
+          category: v.category || 'folder', created_at: v.created_at
         }));
         setVideos(formatted);
         if (formatted.length > 0) {
           setSelectedVideo(formatted[0].path);
+          triggerToast(`${formatted.length} vídeo(s) encontrado(s)!`, 'success');
         } else {
           setSelectedVideo('');
-          triggerToast('Nenhum vídeo (.mp4) encontrado na pasta.', 'info');
+          triggerToast('Nenhum vídeo encontrado na pasta.', 'info');
         }
       } else {
         triggerToast('Erro ao ler a pasta.', 'error');
@@ -257,8 +269,9 @@ export default function usePublisher(triggerToast) {
       triggerToast("Selecione o horário.", "error");
       return;
     }
-    const targetAcc = accounts.find(a => a.username === selectedAccount);
-    if (targetAcc && !targetAcc.has_session) {
+    const targetAcc = accounts.find(a => a.username === selectedAccount || a.display_name === selectedAccount);
+    const isOfficial = targetAcc && (targetAcc.auth_mode === 'official_api' || targetAcc.has_official_token || targetAcc.fb_access_token || targetAcc.fb_ig_account_id);
+    if (targetAcc && !isOfficial && !targetAcc.has_session) {
       triggerToast(`A conta @${selectedAccount} não possui sessão ativa. Acesse a aba Perfis para conectar.`, "error");
       return;
     }
@@ -289,16 +302,16 @@ export default function usePublisher(triggerToast) {
           }
         }
 
-        // 2. Upload video file to VPS if reel
+        // 2. Upload media file to VPS if reel or single image
         let vpsVideoPath = null;
-        if (postType === 'reel' && selectedVideo) {
-          triggerToast('☁️ Enviando vídeo para a nuvem VPS...', 'info');
-          const videoName = selectedVideo.split(/[\\/]/).pop() || 'video.mp4';
+        if ((postType === 'reel' || postType === 'image') && selectedVideo) {
+          triggerToast(postType === 'image' ? '☁️ Enviando imagem para a nuvem VPS...' : '☁️ Enviando vídeo para a nuvem VPS...', 'info');
+          const fileName = selectedVideo.split(/[\\/]/).pop() || (postType === 'image' ? 'photo.jpg' : 'video.mp4');
           const uploadRes = await uploadVideoToCloud(
             cloudConfig.vpsUrl,
             cloudConfig.apiKey,
             selectedVideo,
-            videoName
+            fileName
           );
           vpsVideoPath = uploadRes.video_path;
         }
@@ -320,6 +333,7 @@ export default function usePublisher(triggerToast) {
         setCaption('');
         setScheduledTime('');
         setCarouselImages([]);
+        setSelectedVideo('');
         setCreationWizardOpen(false);
         setWizardStep(1);
         fetchScheduledPosts();
@@ -336,7 +350,7 @@ export default function usePublisher(triggerToast) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          video_path: postType === 'reel' ? selectedVideo : null,
+          video_path: (postType === 'reel' || postType === 'image') ? selectedVideo : null,
           caption,
           scheduled_time: finalScheduledTime,
           account_username: selectedAccount || null,
@@ -351,6 +365,7 @@ export default function usePublisher(triggerToast) {
         setCaption('');
         setScheduledTime('');
         setCarouselImages([]);
+        setSelectedVideo('');
         setCreationWizardOpen(false);
         setWizardStep(1);
         fetchScheduledPosts();
@@ -433,7 +448,7 @@ export default function usePublisher(triggerToast) {
   };
 
   // Calendar Controls
-  const handlePrevDate = () => {
+  const handlePrevDate = useCallback(() => {
     if (calendarView === 'semanal') {
       setCurrentDate(prev => {
         const next = new Date(prev);
@@ -447,9 +462,9 @@ export default function usePublisher(triggerToast) {
         return next;
       });
     }
-  };
+  }, [calendarView]);
 
-  const handleNextDate = () => {
+  const handleNextDate = useCallback(() => {
     if (calendarView === 'semanal') {
       setCurrentDate(prev => {
         const next = new Date(prev);
@@ -463,17 +478,143 @@ export default function usePublisher(triggerToast) {
         return next;
       });
     }
-  };
+  }, [calendarView]);
 
-  const handleTodayDate = () => setCurrentDate(new Date());
+  const handleTodayDate = useCallback(() => setCurrentDate(new Date()), []);
+
+  const handleSelectDate = useCallback((date) => {
+    if (date instanceof Date && !isNaN(date.getTime())) {
+      setCurrentDate(new Date(date));
+    }
+  }, []);
 
   const handleDayClick = (date) => {
-    const tzOffset = date.getTimezoneOffset() * 60000;
-    const localISOTime = (new Date(date.getTime() - tzOffset)).toISOString().slice(0, 10);
-    setScheduledTime(`${localISOTime}T12:00`);
-    setCreationWizardOpen(true);
-    setWizardStep(1);
+    setBulkModalInitialDate(date);
+    setBulkModalOpen(true);
   };
+
+  const handleReschedulePost = useCallback(async (post, targetDate, customTime) => {
+    if (!post || !post.id || !targetDate) return;
+
+    if (post.status === 'posted') {
+      triggerToast("Posts já publicados não podem ser reagendados.", "info");
+      return;
+    }
+
+    const oldDt = post.scheduled_time ? new Date(post.scheduled_time) : new Date();
+    let hours = isNaN(oldDt.getTime()) ? 12 : oldDt.getHours();
+    let minutes = isNaN(oldDt.getTime()) ? 0 : oldDt.getMinutes();
+
+    if (customTime) {
+      const [ch, cm] = String(customTime).split(':').map(Number);
+      if (!isNaN(ch)) hours = ch;
+      if (!isNaN(cm)) minutes = cm;
+    } else if (targetDate instanceof Date && (targetDate.getHours() !== 0 || targetDate.getMinutes() !== 0)) {
+      hours = targetDate.getHours();
+      minutes = targetDate.getMinutes();
+    }
+
+    const newDt = new Date(targetDate);
+    newDt.setHours(hours, minutes, 0, 0);
+    const isoString = newDt.toISOString();
+
+    // Optimistic UI update
+    setScheduledPosts(prev => prev.map(p => {
+      if (p.id === post.id) {
+        return {
+          ...p,
+          scheduled_time: isoString,
+          status: p.status === 'failed' ? 'pending' : p.status,
+          error_message: p.status === 'failed' ? null : p.error_message
+        };
+      }
+      return p;
+    }));
+
+    try {
+      const cloudConfig = getCloudConfig();
+      let res;
+      if (cloudConfig && cloudConfig.enabled && cloudConfig.vpsUrl) {
+        const cleanUrl = cloudConfig.vpsUrl.replace(/\/+$/, '');
+        const headers = { 'Content-Type': 'application/json' };
+        if (cloudConfig.apiKey) headers['X-ViralDog-Key'] = cloudConfig.apiKey.trim();
+        try {
+          res = await fetch(`${cleanUrl}/api/posts/${post.id}`, {
+            method: 'PATCH',
+            headers,
+            body: JSON.stringify({ scheduled_time: isoString })
+          });
+        } catch {
+          res = await fetch(`${API}/api/posts/${post.id}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scheduled_time: isoString })
+          });
+        }
+      } else {
+        res = await fetch(`${API}/api/posts/${post.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scheduled_time: isoString })
+        });
+      }
+
+      if (res && res.ok) {
+        const dayStr = newDt.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+        const timeStr = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+        triggerToast(`📅 Post reagendado para ${dayStr} às ${timeStr}!`, 'success');
+        fetchScheduledPosts();
+      } else {
+        const errData = res ? await res.json().catch(() => ({})) : {};
+        triggerToast(`Erro ao reagendar: ${errData.detail || 'Falha na requisição'}`, 'error');
+        fetchScheduledPosts();
+      }
+    } catch (e) {
+      triggerToast('Erro de conexão ao reagendar post.', 'error');
+      fetchScheduledPosts();
+    }
+  }, [triggerToast, fetchScheduledPosts]);
+
+  // Global keyboard shortcuts for Calendar UX
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      const tag = e.target.tagName ? e.target.tagName.toLowerCase() : '';
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable) {
+        return;
+      }
+      if (creationWizardOpen || bulkModalOpen || deleteModalPost) {
+        return;
+      }
+      if (activeSubTab !== 'calendar') return;
+
+      if (e.key === 'n' || e.key === 'N') {
+        e.preventDefault();
+        setCreationWizardOpen(true);
+        setWizardStep(1);
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        handlePrevDate();
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        handleNextDate();
+      } else if (e.key === 't' || e.key === 'T' || e.key === 'h' || e.key === 'H') {
+        e.preventDefault();
+        handleTodayDate();
+      } else if (e.key === '1') {
+        e.preventDefault();
+        setCalendarView('semanal');
+      } else if (e.key === '2') {
+        e.preventDefault();
+        setCalendarView('mensal');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    creationWizardOpen, bulkModalOpen, deleteModalPost, activeSubTab,
+    handlePrevDate, handleNextDate, handleTodayDate
+  ]);
 
   const getPostsForDay = (date) => {
     const targetYear = date.getFullYear();
@@ -513,7 +654,8 @@ export default function usePublisher(triggerToast) {
     currentDate, selectedFilterAccount, setSelectedFilterAccount,
     selectedFilterFormat, setSelectedFilterFormat,
     creationWizardOpen, setCreationWizardOpen, wizardStep, setWizardStep,
-    bulkModalOpen, setBulkModalOpen,
+    bulkModalOpen, setBulkModalOpen, bulkModalInitialDate, setBulkModalInitialDate,
+    accountsModalOpen, setAccountsModalOpen,
     presetsDropdownOpen, setPresetsDropdownOpen, presetType, setPresetType,
     showSavePresetInput, setShowSavePresetInput, newPresetName, setNewPresetName,
     savedPresets, formatDropdownOpen, setFormatDropdownOpen,
@@ -521,13 +663,16 @@ export default function usePublisher(triggerToast) {
     selectedVideo, setSelectedVideo, selectedAccount, setSelectedAccount,
     caption, setCaption, scheduledTime, setScheduledTime,
     postType, setPostType, carouselImages, setCarouselImages,
+    carouselPreviewUrls, setCarouselPreviewUrls,
+    customFolderPath, setCustomFolderPath,
     generatingAI, scheduling, suggestingTime, loadingFolder,
     videoRef, isVideoPlaying, isVideoMuted, togglePlay, toggleMute,
     handleGenerateCaption, handleSuggestTime, handleScheduleSubmit,
     deleteModalPost, setDeleteModalPost, isDeletingSchedule,
     openDeleteModal, closeDeleteModal, confirmDeleteSchedule,
     handleDeleteSchedule, handleRetrySchedule, handleRepost, scanFolderVideos,
-    handlePrevDate, handleNextDate, handleTodayDate, handleDayClick,
-    getPostsForDay, persistPresets, fetchAccounts, fetchScheduledPosts
+    handlePrevDate, handleNextDate, handleTodayDate, handleDayClick, handleSelectDate,
+    handleReschedulePost,
+    getPostsForDay, persistPresets, fetchAccounts, fetchScheduledPosts, fetchVideos
   };
 }

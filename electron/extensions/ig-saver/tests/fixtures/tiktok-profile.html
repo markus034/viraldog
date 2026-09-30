@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TikTok Profile Fixture</title>
+  <link rel="stylesheet" href="../../tiktok/content.css">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #0f1012; color: #fff; font-family: Arial, sans-serif; }
+    main { width: min(980px, calc(100% - 32px)); margin: 0 auto; padding: 34px 0; }
+    .profile-header { padding-bottom: 28px; border-bottom: 1px solid #303136; }
+    h1 { margin: 0 0 5px; font-size: 30px; }
+    h2 { margin: 0 0 18px; color: #aaa; font-size: 16px; }
+    .native-actions { display: flex; align-items: center; gap: 8px; }
+    .native-actions > div { display: inline-flex; }
+    [data-e2e="follow-button"] { height: 36px; min-width: 100px; border: 0; border-radius: 6px; background: #fff; color: #111; font-weight: 700; }
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 24px; }
+    .tile { position: relative; aspect-ratio: 3 / 4; overflow: hidden; border-radius: 5px; background: #25262a; }
+    .tile > button:not(.dog-saver-tiktok-post-button) { width: 100%; height: 100%; padding: 0; border: 0; background: transparent; }
+    .tile a, .tile img { width: 100%; height: 100%; display: block; }
+    .tile img { object-fit: cover; }
+    @media (max-width: 640px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  </style>
+</head>
+<body>
+  <main id="main-content-others_homepage" data-e2e="user-page">
+    <section class="profile-header">
+      <h1>Dog Creator</h1>
+      <h2>dogcreator</h2>
+      <div class="native-actions">
+        <div><button type="button" data-e2e="follow-button" aria-label="Seguir Dog Creator">Seguir</button></div>
+      </div>
+    </section>
+    <section class="grid">
+      <div class="tile"><button type="button"><a href="https://www.tiktok.com/@dogcreator/video/12345678901"><img alt="Vídeo 1" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='400'%3E%3Crect width='300' height='400' fill='%2325f4ee'/%3E%3C/svg%3E"></a></button></div>
+      <div class="tile"><button type="button"><a href="https://www.tiktok.com/@dogcreator/photo/12345678902"><img alt="Fotos 2" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='400'%3E%3Crect width='300' height='400' fill='%23fe2c55'/%3E%3C/svg%3E"></a></button></div>
+      <div class="tile"><button type="button"><a href="https://www.tiktok.com/@dogcreator/video/12345678903"><img alt="Vídeo 3" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='400'%3E%3Crect width='300' height='400' fill='%23f5b301'/%3E%3C/svg%3E"></a></button></div>
+    </section>
+  </main>
+  <script>
+    const fixtureStorage = {};
+    globalThis.chrome = {
+      runtime: {
+        lastError: null,
+        onMessage: { addListener() {} },
+        sendMessage(message, callback) {
+          callback(message.type === "TIKTOK_CHECK_PRO" ? { pro: true } : { downloadId: 1 });
+        }
+      },
+      storage: {
+        local: {
+          async get(key) { return { [key]: fixtureStorage[key] }; },
+          async set(values) { Object.assign(fixtureStorage, values); }
+        }
+      }
+    };
+    history.replaceState({}, "", "/@dogcreator");
+  </script>
+  <script src="../../tiktok/parser.js"></script>
+  <script src="../../tiktok/profile-filters.js"></script>
+  <script src="../../tiktok/content.js"></script>
+</body>
+</html>

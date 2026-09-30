@@ -7,8 +7,12 @@ import time
 import os
 import json
 import requests
+try:
+    from instagrapi import Client
+    INSTAGRAPI_AVAILABLE = True
+except ImportError:
+    Client = None
 from datetime import datetime, timedelta
-from instagrapi import Client
 from sqlalchemy.orm import Session
 from database import Config, Post, PostAnalytics, Account, AccountProfile
 import backend_ai_service as ai_service
@@ -259,7 +263,13 @@ def publish_via_official_api(video_path: str, caption: str, access_token: str, i
     if not access_token or not ig_user_id:
         raise ValueError("Token de acesso ou ID da conta do Instagram não informado.")
 
-    base_url = f"https://graph.facebook.com/v22.0/{ig_user_id}/media"
+    # Determinar host da API (graph.instagram.com para tokens IGA ou graph.facebook.com para tokens EAA)
+    if access_token.startswith("IGA") or access_token.startswith("IGQ") or "instagram.com" in str(ig_user_id):
+        graph_host = "https://graph.instagram.com"
+    else:
+        graph_host = "https://graph.facebook.com"
+
+    base_url = f"{graph_host}/v22.0/{ig_user_id}/media"
     uploaded_keys_to_clean = []
 
     try:
@@ -338,7 +348,7 @@ def publish_via_official_api(video_path: str, caption: str, access_token: str, i
             raise Exception("Container ID não retornado pela API da Meta.")
 
         # 4. Polling do status do container até FINISHED
-        check_url = f"https://graph.facebook.com/v22.0/{container_id}"
+        check_url = f"{graph_host}/v22.0/{container_id}"
         print(f"[Meta API] Aguardando processamento do container {container_id}...")
         status_ok = False
         for attempt in range(40):  # 40 * 3s = 120s timeout
@@ -362,7 +372,7 @@ def publish_via_official_api(video_path: str, caption: str, access_token: str, i
             raise Exception("Tempo limite esgotado aguardando processamento do vídeo pela Meta.")
 
         # 5. Publicar o Container
-        publish_url = f"https://graph.facebook.com/v22.0/{ig_user_id}/media_publish"
+        publish_url = f"{graph_host}/v22.0/{ig_user_id}/media_publish"
         pub_res = requests.post(
             publish_url,
             data={"creation_id": container_id, "access_token": access_token},

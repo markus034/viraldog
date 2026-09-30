@@ -73,6 +73,15 @@ export function setCurrentUser(user) {
   }
 }
 
+export function logoutUser() {
+  try {
+    localStorage.removeItem('viraldog_auth_token');
+    localStorage.removeItem('viraldog_user');
+  } catch (e) {
+    console.error('Erro ao deslogar:', e);
+  }
+}
+
 export function getAuthHeaders(customHeaders = {}) {
   const token = getAuthToken();
   const headers = { ...customHeaders };

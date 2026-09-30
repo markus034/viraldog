@@ -45,30 +45,33 @@ export default function CustomDateTimePicker({ value, onChange, onSuggestTime, s
   const calculateCoords = useCallback(() => {
     if (containerRef.current) {
       const rect = containerRef.current.getBoundingClientRect();
-      const popoverWidth = mode === 'date' ? 288 : 340;
-      const popoverHeight = mode === 'date' ? 310 : 510;
+      const popoverWidth = mode === 'date' ? 280 : 320;
+      const popoverHeight = mode === 'date' ? 300 : 515;
       
-      // Horizontal positioning
-      let left = rect.right - popoverWidth;
-      if (left < 10) left = rect.left;
-      if (left + popoverWidth > window.innerWidth - 10) {
-        left = Math.max(10, window.innerWidth - popoverWidth - 10);
-      }
+      // Horizontal positioning: default to left side of trigger button
+      let left = rect.left - popoverWidth - 12;
       
-      // Vertical positioning: try below, then above, then clamp within viewport
-      let top = rect.bottom + 6;
-      if (top + popoverHeight > window.innerHeight - 10) {
-        const topAbove = rect.top - popoverHeight - 6;
-        if (topAbove >= 10) {
-          top = topAbove;
+      // If there is not enough room on the left, fall back to the right side
+      if (left < 12) {
+        if (rect.right + popoverWidth + 12 <= window.innerWidth) {
+          left = rect.right + 12;
         } else {
-          top = Math.max(10, window.innerHeight - popoverHeight - 10);
+          // If neither fits cleanly, clamp safely within viewport
+          left = Math.max(12, Math.min(rect.left, window.innerWidth - popoverWidth - 12));
         }
       }
+      
+      // Vertical positioning: vertically centered relative to trigger button
+      const triggerCenterY = rect.top + (rect.height / 2);
+      let top = triggerCenterY - (popoverHeight / 2);
+      
+      // Clamp within viewport margins (12px top and bottom)
+      const maxTop = Math.max(12, window.innerHeight - popoverHeight - 12);
+      top = Math.max(12, Math.min(top, maxTop));
 
       return {
-        top: Math.max(10, Math.round(top)),
-        left: Math.max(10, Math.round(left)),
+        top: Math.round(top),
+        left: Math.round(left),
         width: popoverWidth
       };
     }
@@ -196,6 +199,41 @@ export default function CustomDateTimePicker({ value, onChange, onSuggestTime, s
     const updated = new Date(tom.getFullYear(), tom.getMonth(), tom.getDate(), current.getHours(), current.getMinutes());
     onChange(toISO(updated));
     if (mode === 'date') setIsOpen(false);
+  };
+
+  const applyPresetNow = () => {
+    const now = new Date();
+    now.setMinutes(now.getMinutes() + 2);
+    onChange(toISO(now));
+  };
+
+  const applyPresetAIBestTime = () => {
+    if (onSuggestTime) {
+      onSuggestTime();
+      return;
+    }
+    const PEAKS = [
+      { h: 9, m: 15 },
+      { h: 12, m: 30 },
+      { h: 15, m: 45 },
+      { h: 18, m: 20 },
+      { h: 20, m: 45 }
+    ];
+    const now = new Date();
+    const currentMins = now.getHours() * 60 + now.getMinutes();
+    
+    // Find next peak today
+    let nextPeak = PEAKS.find(p => (p.h * 60 + p.m) > currentMins + 15);
+    let targetDate = new Date(now);
+    
+    if (nextPeak) {
+      targetDate.setHours(nextPeak.h, nextPeak.m, 0, 0);
+    } else {
+      // Tomorrow morning first peak
+      targetDate.setDate(targetDate.getDate() + 1);
+      targetDate.setHours(PEAKS[0].h, PEAKS[0].m, 0, 0);
+    }
+    onChange(toISO(targetDate));
   };
 
   const applyPresetPlus1Hour = () => {
@@ -332,11 +370,10 @@ export default function CustomDateTimePicker({ value, onChange, onSuggestTime, s
             position: 'fixed',
             top: `${coords.top}px`,
             left: `${coords.left}px`,
-            width: mode === 'date' ? '288px' : `${coords.width}px`,
-            maxHeight: 'calc(100vh - 20px)',
+            width: `${coords.width}px`,
             zIndex: 9999999,
           }}
-          className="bg-white border border-[#E8E8ED] rounded-2xl p-3.5 shadow-[0_20px_50px_rgba(0,0,0,0.25)] animate-in fade-in zoom-in-95 duration-150 flex flex-col gap-3 overflow-y-auto custom-scrollbar"
+          className="bg-white border border-[#E8E8ED] rounded-2xl p-3 shadow-[0_20px_50px_rgba(0,0,0,0.22)] animate-in fade-in zoom-in-95 duration-150 flex flex-col gap-2.5 overflow-visible"
         >
           {/* Quick Presets Section */}
           <div className="flex flex-col gap-1 pb-2 border-b border-[#F5F5F7]">
@@ -370,10 +407,17 @@ export default function CustomDateTimePicker({ value, onChange, onSuggestTime, s
                 <>
                   <button
                     type="button"
+                    onClick={applyPresetNow}
+                    className="px-2.5 py-1 rounded-lg bg-[#F5F5F7] hover:bg-[#0071E3]/10 hover:text-[#0071E3] text-xs font-semibold text-[#1D1D1F] transition-colors cursor-pointer"
+                  >
+                    ⚡ Agora
+                  </button>
+                  <button
+                    type="button"
                     onClick={applyPresetPlus1Hour}
                     className="px-2.5 py-1 rounded-lg bg-[#F5F5F7] hover:bg-[#0071E3]/10 hover:text-[#0071E3] text-xs font-semibold text-[#1D1D1F] transition-colors cursor-pointer"
                   >
-                    ⚡ +1h
+                    +1h
                   </button>
                   <button
                     type="button"
@@ -389,16 +433,14 @@ export default function CustomDateTimePicker({ value, onChange, onSuggestTime, s
                   >
                     🌅 Amanhã 9h
                   </button>
-                  {onSuggestTime && (
-                    <button
-                      type="button"
-                      onClick={() => { onSuggestTime(); }}
-                      disabled={suggestingTime}
-                      className="px-2.5 py-1 rounded-lg bg-gradient-to-r from-purple-500/10 to-[#0071E3]/10 text-[#0071E3] border border-[#0071E3]/20 text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
-                    >
-                      <span>✨</span> {suggestingTime ? 'Calculando...' : 'IA Sugerir'}
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={applyPresetAIBestTime}
+                    disabled={suggestingTime}
+                    className="px-2.5 py-1 rounded-lg bg-gradient-to-r from-purple-500/10 to-[#0071E3]/10 hover:from-purple-500/20 hover:to-[#0071E3]/20 text-[#0071E3] border border-[#0071E3]/20 text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                  >
+                    <span>✨</span> {suggestingTime ? 'Calculando...' : 'IA Horário'}
+                  </button>
                 </>
               )}
             </div>

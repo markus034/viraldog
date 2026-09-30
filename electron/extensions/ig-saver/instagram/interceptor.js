@@ -9,18 +9,35 @@
   if (window.__igSaverInterceptorActive) return;
   window.__igSaverInterceptorActive = true;
 
+  const cachedStoryItemsByUser = new Map();
+
   window.addEventListener("message", (event) => {
-    if (event.source !== window || event.data?.type !== REQUEST_TYPE) return;
-    const shortcode = String(event.data.shortcode || "");
-    const cachedItem = cachedItemsByShortcode.get(shortcode);
-    window.postMessage(
-      {
-        type: RESPONSE_TYPE,
-        requestId: event.data.requestId,
-        rawItems: cachedItem ? [cachedItem] : [],
-      },
-      "*",
-    );
+    if (event.source !== window) return;
+    if (event.data?.type === REQUEST_TYPE) {
+      const shortcode = String(event.data.shortcode || "");
+      const cachedItem = cachedItemsByShortcode.get(shortcode);
+      window.postMessage(
+        {
+          type: RESPONSE_TYPE,
+          requestId: event.data.requestId,
+          rawItems: cachedItem ? [cachedItem] : [],
+        },
+        "*",
+      );
+      return;
+    }
+    if (event.data?.type === "IG_SAVER_REQUEST_INTERCEPTED_STORIES") {
+      const targetUser = String(event.data.username || "").toLowerCase().replace(/^@+/, "");
+      const items = targetUser ? (cachedStoryItemsByUser.get(targetUser) || []) : [];
+      window.postMessage(
+        {
+          type: "IG_SAVER_INTERCEPTED_STORIES_RESPONSE",
+          requestId: event.data.requestId,
+          rawItems: items,
+        },
+        "*",
+      );
+    }
   });
 
   const originalFetch = window.fetch;
@@ -73,20 +90,28 @@
   function shouldIntercept(url) {
     url = String(url || "");
     const isGraphQL = url.includes("/graphql/query") || url.includes("/api/graphql");
-    const isFeed = url.includes("/api/v1/feed/") || url.includes("/api/v1/clips/");
+    const isFeed = url.includes("/api/v1/feed/") || url.includes("/api/v1/clips/") || url.includes("/reels_media");
     if (!isGraphQL && !isFeed) return false;
-    if (url.includes("/story/") || url.includes("/reels_media")) return false;
     return true;
   }
 
   function processResponseText(text) {
     text = String(text || "").trim();
     if (!text.startsWith("{") && !text.startsWith("[")) return;
-    const json = JSON.parse(text);
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      return;
+    }
     const rawItems = extractRawItems(json);
+    const storyItems = extractStoryItems(json);
     const pagination = getPaginationInfo(json);
 
     cacheRawItems(rawItems || []);
+    if (storyItems && storyItems.length > 0) {
+      cacheStoryItems(storyItems);
+    }
 
     if (rawItems || pagination) {
       window.postMessage({
@@ -100,14 +125,41 @@
   function extractRawItems(u) {
     const connection = u?.data?.xdt_api__v1__feed__user_timeline_graphql_connection;
     if (connection?.edges) return connection.edges;
-    const homeConnection = u?.data?.xdt_api__v1__feed__timeline__connection;
-    if (homeConnection?.edges) return homeConnection.edges;
+    const clipsConnection = u?.data?.xdt_api__v1__clips__user__connection_v2 || u?.data?.xdt_api__v1__clips__user__connection;
+    if (clipsConnection?.edges) return clipsConnection.edges;
     const timeline = u?.data?.user?.edge_owner_to_timeline_media;
     if (timeline?.edges) return timeline.edges;
-    if (Array.isArray(u?.feed_items)) return u.feed_items;
-    if (Array.isArray(u?.items)) return u.items;
+    if (Array.isArray(u?.items) && !u?.feed_items) return u.items;
     const shortcodeMedia = u?.data?.xdt_shortcode_media;
     if (shortcodeMedia) return [shortcodeMedia];
+
+    return null;
+  }
+
+  function extractStoryItems(u) {
+    const reelsMedia = u?.data?.xdt_api__v1__feed__reels_media?.reels_media || u?.data?.reels_media || u?.reels_media;
+    if (Array.isArray(reelsMedia)) {
+      const allItems = [];
+      for (const r of reelsMedia) {
+        if (Array.isArray(r?.items)) allItems.push(...r.items);
+      }
+      if (allItems.length > 0) return allItems;
+    }
+
+    const reelsObj = u?.data?.reels || u?.reels;
+    if (reelsObj && typeof reelsObj === "object") {
+      const allItems = [];
+      for (const r of Object.values(reelsObj)) {
+        if (Array.isArray(r?.items)) allItems.push(...r.items);
+      }
+      if (allItems.length > 0) return allItems;
+    }
+
+    const reelObj = u?.data?.reel || u?.reel;
+    if (Array.isArray(reelObj?.items) && reelObj.items.length > 0) return reelObj.items;
+    if (Array.isArray(u?.data?.user?.story?.items) && u.data.user.story.items.length > 0) return u.data.user.story.items;
+    if (Array.isArray(u?.data?.user?.highlight_reel?.items) && u.data.user.highlight_reel.items.length > 0) return u.data.user.highlight_reel.items;
+
     return null;
   }
 
@@ -120,7 +172,7 @@
     if (!Array.isArray(rawItems)) return;
     for (const item of rawItems) {
       const node = unwrapRawItem(item);
-      const shortcode = String(node?.code ?? node?.shortcode ?? "");
+      const shortcode = String(node?.code ?? node?.shortcode ?? node?.pk ?? node?.id ?? "");
       if (shortcode) cachedItemsByShortcode.set(shortcode, item);
     }
     if (cachedItemsByShortcode.size > 500) {
@@ -133,6 +185,27 @@
     }
   }
 
+  function cacheStoryItems(storyItems) {
+    if (!Array.isArray(storyItems)) return;
+    for (const item of storyItems) {
+      const node = unwrapRawItem(item);
+      const shortcode = String(node?.code ?? node?.shortcode ?? node?.pk ?? node?.id ?? "");
+      if (shortcode) cachedItemsByShortcode.set(shortcode, item);
+
+      const username = String(node?.user?.username || node?.owner?.username || "").toLowerCase();
+      if (username) {
+        let userItems = cachedStoryItemsByUser.get(username) || [];
+        if (!userItems.some(it => {
+          let n = unwrapRawItem(it);
+          return String(n?.code ?? n?.pk ?? n?.id ?? "") === shortcode;
+        })) {
+          userItems.push(item);
+          cachedStoryItemsByUser.set(username, userItems.slice(-100));
+        }
+      }
+    }
+  }
+
   function getPaginationInfo(u) {
     const connection = u?.data?.xdt_api__v1__feed__user_timeline_graphql_connection;
     if (connection?.page_info) {
@@ -141,11 +214,11 @@
         endCursor: connection.page_info.end_cursor || null
       };
     }
-    const homeConnection = u?.data?.xdt_api__v1__feed__timeline__connection;
-    if (homeConnection?.page_info) {
+    const clipsConnection = u?.data?.xdt_api__v1__clips__user__connection_v2 || u?.data?.xdt_api__v1__clips__user__connection;
+    if (clipsConnection?.page_info) {
       return {
-        hasNextPage: homeConnection.page_info.has_next_page ?? false,
-        endCursor: homeConnection.page_info.end_cursor || null
+        hasNextPage: clipsConnection.page_info.has_next_page ?? false,
+        endCursor: clipsConnection.page_info.end_cursor || null
       };
     }
     const timeline = u?.data?.user?.edge_owner_to_timeline_media;

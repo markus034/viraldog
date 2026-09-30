@@ -1,4 +1,5 @@
 "use strict";
+const VIRALDOG_LOCAL_API_PORT = 37421;
 if (typeof chrome !== 'undefined') {
   if (!chrome.offscreen) {
     chrome.offscreen = {
@@ -17,31 +18,102 @@ if (typeof chrome !== 'undefined') {
   }
 }
 
-// Send media downloads through the page bridge so Electron receives the full
-// "profile/file" path. Native extension downloads expose only the basename.
 function relayDownloadToElectron(options) {
   return new Promise((resolve, reject) => {
-    chrome.tabs.query({ url: 'https://www.instagram.com/*' }, function(tabs) {
-      const queryError = chrome.runtime.lastError;
-      if (queryError || !tabs || tabs.length === 0) {
-        reject(new Error(queryError?.message || 'INSTAGRAM_TAB_NOT_FOUND'));
-        return;
-      }
-      chrome.tabs.sendMessage(tabs[0].id, {
-        type: 'POLYFILL_TRIGGER_DOWNLOAD',
+    if (!options || !options.url) {
+      reject(new Error('MISSING_DOWNLOAD_URL'));
+      return;
+    }
+    // 1. Tentar via servidor loopback HTTP local (127.0.0.1:37421) diretamente no processo do Electron
+    fetch(`http://127.0.0.1:${VIRALDOG_LOCAL_API_PORT}/download-single`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
         url: options.url,
-        filename: options.filename || ''
-      }, function() {
-        const messageError = chrome.runtime.lastError;
-        if (messageError) reject(new Error(messageError.message));
-        else resolve(12345);
+        filename: options.filename || '',
+        username: (options.filename || '').split(/[\/\\]/)[0] || ''
+      })
+    })
+    .then(r => r.json())
+    .then(result => {
+      if (result && result.success) {
+        resolve(result.downloadId || 12345);
+      } else {
+        throw new Error(result?.error || 'DOWNLOAD_SINGLE_FAILED');
+      }
+    })
+    .catch(() => {
+      // 2. Fallback via messaging de abas
+      chrome.tabs.query({}, function(tabs) {
+        const queryError = chrome.runtime.lastError;
+        if (queryError || !tabs || tabs.length === 0) {
+          reject(new Error(queryError?.message || 'NO_BROWSER_TAB_FOUND'));
+          return;
+        }
+        const validTabs = tabs.filter(t => t.url && (/instagram\.com/i.test(t.url) || /tiktok\.com/i.test(t.url)));
+        const targetTab = validTabs[0] || tabs[0];
+        if (!targetTab || !targetTab.id) {
+          reject(new Error('NO_VALID_TARGET_TAB_FOUND'));
+          return;
+        }
+        chrome.tabs.sendMessage(targetTab.id, {
+          type: 'POLYFILL_TRIGGER_DOWNLOAD',
+          url: options.url,
+          filename: options.filename || ''
+        }, function(response) {
+          const messageError = chrome.runtime.lastError;
+          if (messageError) reject(new Error(messageError.message));
+          else resolve(response?.downloadId || 12345);
+        });
       });
     });
   });
 }
-"use strict";
+
+// Uses a local HTTP server (127.0.0.1:37421) started by ig-browser.js so that
+// this service worker can reach the Electron main process without ipcRenderer.
+function relayZipBuildToElectron(options) {
+  return new Promise((resolve, reject) => {
+    if (!options || !options.items || options.items.length === 0) {
+      reject(new Error('Nenhum arquivo para baixar no lote'));
+      return;
+    }
+    fetch(`http://127.0.0.1:${VIRALDOG_LOCAL_API_PORT}/build-zip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: options.username,
+        items: options.items,
+        filename: options.filename || '',
+        taskId: options.taskId || '',
+        concurrency: options.concurrency || 8
+      })
+    })
+    .then(r => r.json())
+    .then(result => {
+      if (result.success) resolve(result);
+      else reject(new Error(result.error || 'BUILD_ZIP_FAILED'));
+    })
+    .catch(err => reject(new Error('LOCAL_API_FETCH_FAILED: ' + err.message)));
+  });
+}
+
+if (typeof chrome !== 'undefined' && !chrome.downloads) {
+  chrome.downloads = {
+    download: function(options, callback) {
+      const promise = relayDownloadToElectron(options);
+      if (typeof callback === 'function') {
+        promise
+          .then((id) => callback(id))
+          .catch(() => callback(undefined));
+      }
+      return promise;
+    }
+  };
+}
+
 (() => {
-  var X = { concurrency: 3, maxRetries: 2, zipChunkSize: 1e3 };
+  var X = { concurrency: 8, maxRetries: 2, zipChunkSize: 0 };
   function selectVideoUrl(versions, fallbackUrl) {
     if (Array.isArray(versions) && versions.length > 0) {
       let sorted = [...versions].sort((a, b) => {
@@ -94,7 +166,7 @@ function relayDownloadToElectron(options) {
     filename += `.${t}`;
 
     if (s.postId.startsWith("story_"))
-      return `${i}/stories/${filename}`;
+      return `${i}/${filename}`;
     if (s.postId.startsWith("highlight_")) {
       let d = s.highlightTitle ? `/${Z(s.highlightTitle)}` : "";
       return `${i}/highlights${d}/${filename}`;
@@ -472,11 +544,17 @@ function relayDownloadToElectron(options) {
       }
     }
     triggerDownload(e, t) {
-      return relayDownloadToElectron({
-        url: e,
-        filename: t,
-        conflictAction: "uniquify",
-        saveAs: !1,
+      return new Promise((i, a) => {
+        chrome.downloads.download(
+          { url: e, filename: t, conflictAction: "uniquify", saveAs: !1 },
+          (o) => {
+            chrome.runtime.lastError
+              ? a(new Error(chrome.runtime.lastError.message))
+              : o === void 0
+                ? a(new Error("DOWNLOAD_FAILED"))
+                : i(o);
+          },
+        );
       });
     }
     async updateItemStatus(e, t, i, a) {
@@ -514,22 +592,22 @@ function relayDownloadToElectron(options) {
     }
   };
   function Ee(s, e) {
-    return e.mode === "all"
-      ? !0
-      : !(
-          (e.fromTs !== null && s < e.fromTs) ||
-          (e.toTs !== null && s > e.toTs)
-        );
+    if (!e || e.mode === "all") return !0;
+    if (s <= 0) return !0;
+    return !(
+      (e.fromTs !== null && s < e.fromTs) ||
+      (e.toTs !== null && s > e.toTs)
+    );
   }
   function Ge(s, e) {
-    return e.mode === "all"
-      ? !1
-      : e.mode === "range" && e.toTs !== null
-        ? s > e.toTs
-        : !1;
+    if (!e || e.mode === "all") return !1;
+    if (s <= 0) return !1;
+    return e.mode === "range" && e.toTs !== null ? s > e.toTs : !1;
   }
   function de(s, e) {
-    return e.mode === "all" ? !1 : e.fromTs !== null ? s < e.fromTs : !1;
+    if (!e || e.mode === "all") return !1;
+    if (s <= 0) return !1;
+    return e.fromTs !== null ? s < e.fromTs : !1;
   }
   function Me(s, e) {
     return de(s, e);
@@ -2425,8 +2503,8 @@ y haz clic en el bot\xF3n "Descargar todo"`,
     status_count: "{posts} publica\xE7\xF5es \xB7 {media} arquivos",
     status_count_zips: "\xB7 ~{parts} ZIPs",
     status_scanned_to: "Escaneado at\xE9 {date}",
-    status_loading_next: "Carregando pr\xF3xima p\xE1gina...",
-    status_loading_first: "Carregando primeira p\xE1gina...",
+    status_loading_next: "Buscando pr\xF3ximas publica\xE7\xF5es...",
+    status_loading_first: "Buscando publica\xE7\xF5es...",
     status_rate_limited_scroll:
       "Limite da API atingido, mudando para modo scroll...",
     status_rate_limited_retry:
@@ -5106,8 +5184,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         (this.windowMs = e?.windowMs ?? 11 * 60 * 1e3));
     }
     static randomDelay() {
-      let t = -Math.log(Math.random()) / 0.6;
-      return Math.min(t, 15);
+      return Math.random() * 0.1 + 0.05;
     }
     queryWaitTime(e) {
       let t = performance.now();
@@ -5169,6 +5246,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     rateController;
     externalCsrfToken = null;
     profilePicUrl = null;
+    firstPageTimelineData = null;
     static extractHdProfilePicUrl(e) {
       if (!e || typeof e != "object") return null;
       let t = e.hd_profile_pic_url_info;
@@ -5187,13 +5265,14 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
           ? e.profile_pic_url
           : null;
     }
-    constructor(e, t, i, a = "timeline", o, r) {
+    constructor(e, t, i, a = "timeline", o, r, providedUserId = null) {
       ((this.username = e),
         (this.filter = t),
         (this.dateFilter = i),
         (this.source = a),
         (this.rateController = o ?? new x()),
         (this.externalCsrfToken = r ?? null));
+      if (providedUserId) this.userId = String(providedUserId);
     }
     async fetchHdProfilePic() {
       if (
@@ -5238,13 +5317,31 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         } catch {}
     }
     async fetchPage(e) {
-      this.userId ||
-        ((this.userId = await this.getUserId()),
-        await this.fetchHdProfilePic());
+      if (!this.userId) {
+        this.userId = await this.getUserId();
+      }
+      if (!this.profilePicUrl) {
+        this.fetchHdProfilePic().catch(() => {});
+      }
       let t,
         i = e === null;
-      if (this.source === "reels") t = await this.fetchReelsApi(e);
-      else {
+      let isReelsMode = this.source === "reels" || this.filter === "videos";
+      if (i && this.firstPageTimelineData && !isReelsMode) {
+        t = this.firstPageTimelineData;
+        this.firstPageTimelineData = null;
+      }
+      if (isReelsMode) {
+        try {
+          t = await this.fetchReelsApi(e);
+        } catch (err) {
+          console.warn("[Dog Saver] fetchReelsApi falhou, tentando fallback GraphQL para Reels...", err.message);
+          try {
+            t = await this.fetchGraphQL(e);
+          } catch (gqlErr) {
+            console.warn("[Dog Saver] GraphQL Reels fallback falhou:", gqlErr.message);
+          }
+        }
+      } else if (!t) {
         if (i) {
           let l = this.tryGetFirstPageFromPage();
           l && (t = l);
@@ -5267,34 +5364,38 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       let a = this.extractEdges(t),
         o = [],
         r = !1,
-        n = this.source === "reels";
+        n = this.source === "reels",
+        oldestPageTs = 0;
       for (let l of a) {
         let c = l.node,
           d = this.parsePostNode(c);
-        if (!n && de(d.timestamp, this.dateFilter)) {
+        if (d.timestamp > 0 && (oldestPageTs === 0 || d.timestamp < oldestPageTs)) {
+          oldestPageTs = d.timestamp;
+        }
+        if (!n && d.timestamp > 0 && de(d.timestamp, this.dateFilter)) {
           r = !0;
           break;
         }
-        Ge(d.timestamp, this.dateFilter) ||
-          (Ee(d.timestamp, this.dateFilter) &&
-            (this.shouldSkipByType(d) || o.push(d)));
+        if (!Ge(d.timestamp, this.dateFilter) && Ee(d.timestamp, this.dateFilter)) {
+          if (!this.shouldSkipByType(d)) o.push(d);
+        }
       }
       let _ = this.extractPageInfo(t);
-      if (!r && a.length > 0)
-        if (n)
-          a.every((c) => {
-            let d = c.node?.taken_at_timestamp ?? c.node?.taken_at ?? 0;
-            return d > 0 && de(d, this.dateFilter);
-          }) && (r = !0);
-        else {
-          let l = a[0]?.node,
-            c = l?.taken_at_timestamp ?? l?.taken_at ?? 0;
-          c > 0 && Me(c, this.dateFilter) && (r = !0);
+      if (!r && a.length > 0) {
+        let lastNode = a[a.length - 1]?.node;
+        let lastTs = lastNode?.taken_at_timestamp ?? lastNode?.taken_at ?? lastNode?.timestamp ?? 0;
+        if (lastTs > 0 && (oldestPageTs === 0 || lastTs < oldestPageTs)) {
+          oldestPageTs = lastTs;
         }
+        if (lastTs > 0 && de(lastTs, this.dateFilter)) {
+          r = !0;
+        }
+      }
       return {
         posts: o,
         cursor: r ? null : _.endCursor,
         hasNextPage: r ? !1 : _.hasNextPage,
+        oldestPageTs,
       };
     }
     tryGetFirstPageFromPage() {
@@ -5332,24 +5433,48 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       return null;
     }
     async getUserId() {
+      // 1. Tentar API web_profile_info com cabeçalhos completos (funciona 100% em background)
       try {
+        let headers = {
+          "X-IG-App-ID": "936619743392459",
+          "X-ASBD-ID": "129477",
+          "X-Requested-With": "XMLHttpRequest",
+          Referer: `https://www.instagram.com/${this.username}/`,
+        };
+        if (this.externalCsrfToken) headers["X-CSRFToken"] = this.externalCsrfToken;
         let e = await fetch(
           `https://www.instagram.com/api/v1/users/web_profile_info/?username=${this.username}`,
           {
             credentials: "include",
-            headers: {
-              "X-IG-App-ID": "936619743392459",
-              "X-Requested-With": "XMLHttpRequest",
-              Referer: `https://www.instagram.com/${this.username}/`,
-            },
+            headers,
           },
         );
         if (e.ok) {
           let i = (await T(e))?.data?.user,
-            a = i?.id;
-          if (a) return ((this.profilePicUrl = s.extractHdProfilePicUrl(i)), a);
+            a = i?.id || i?.pk;
+          if (i?.edge_owner_to_timeline_media?.edges?.length) {
+            this.firstPageTimelineData = { data: { user: i } };
+          }
+          if (a) return ((this.profilePicUrl = s.extractHdProfilePicUrl(i)), String(a));
         }
       } catch {}
+
+      // 2. Tentar consultar a aba do perfil caso esteja aberta
+      try {
+        let tabs = await chrome.tabs.query({ url: "*://*.instagram.com/*" });
+        let targetTab = tabs.find(t => t.url && t.url.toLowerCase().includes(this.username.toLowerCase()));
+        if (targetTab && targetTab.id) {
+          let res = await chrome.tabs.sendMessage(targetTab.id, {
+            type: "IG_SAVER_GET_PAGE_USER_ID",
+            username: this.username
+          });
+          if (res && res.userId) {
+            if (res.profilePicUrl && !this.profilePicUrl) this.profilePicUrl = res.profilePicUrl;
+            return String(res.userId);
+          }
+        }
+      } catch (err) {}
+
       if (!(typeof document > "u"))
         try {
           let e = document.querySelectorAll('script[type="application/json"]');
@@ -5364,6 +5489,8 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
             }
           }
         } catch {}
+
+      // 3. Fallback no HTML da página do perfil
       try {
         let t = await (
             await fetch(`https://www.instagram.com/${this.username}/`, {
@@ -5373,11 +5500,13 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
                 Referer: `https://www.instagram.com/${this.username}/`,
               },
             })
-          ).text(),
-          i = t.match(/"profilePage_(\d+)"/);
-        if (i) return i[1];
-        let a = t.match(/"user":\s*\{[^}]*"id":\s*"(\d+)"/);
-        if (a) return a[1];
+          ).text();
+        let uTarget = this.username.toLowerCase();
+        let match = t.match(new RegExp(`"${uTarget}"[\\s\\S]{0,300}?"(?:id|pk|target_id)":\\s*"(\\d+)"`, "i")) ||
+                    t.match(new RegExp(`"(?:id|pk|target_id)":\\s*"(\\d+)"[\\s\\S]{0,300}?"${uTarget}"`, "i")) ||
+                    t.match(/"profilePage_(\d+)"/) ||
+                    t.match(/"user":\s*\{[^}]*"id":\s*"(\d+)"/);
+        if (match && match[1]) return String(match[1]);
       } catch {}
       throw new Error(I);
     }
@@ -5414,16 +5543,22 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       (await this.doSleep(),
         await this.rateController.waitBeforeQuery("user_feed"));
       let t = new URLSearchParams({ count: "50" });
-      e && t.set("max_id", e);
+      if (e && typeof e === "string" && e !== "undefined" && e !== "null") {
+        t.set("max_id", e);
+      }
+      let headers = {
+        "X-IG-App-ID": "936619743392459",
+        "X-ASBD-ID": "129477",
+        "X-Requested-With": "XMLHttpRequest",
+        Referer: `https://www.instagram.com/${this.username}/`,
+      };
+      if (this.externalCsrfToken) headers["X-CSRFToken"] = this.externalCsrfToken;
       let i = await fetch(
         `https://www.instagram.com/api/v1/feed/user/${this.userId}/?${t}`,
         {
           credentials: "include",
-          headers: {
-            "X-IG-App-ID": "936619743392459",
-            "X-Requested-With": "XMLHttpRequest",
-            Referer: `https://www.instagram.com/${this.username}/`,
-          },
+          headers,
+          signal: AbortSignal.timeout(15000),
         },
       );
       if (i.status === 429)
@@ -5443,6 +5578,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
             c = {
               "Content-Type": "application/x-www-form-urlencoded",
               "X-IG-App-ID": "936619743392459",
+              "X-ASBD-ID": "129477",
               "X-Requested-With": "XMLHttpRequest",
               Referer: `https://www.instagram.com/${this.username}/`,
             },
@@ -5454,6 +5590,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
               credentials: "include",
               headers: c,
               body: l,
+              signal: AbortSignal.timeout(15000),
             })
           );
         },
@@ -5467,8 +5604,13 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
           username: this.username,
           __relay_internal__pv__PolarisFeedShareMenurelayprovider: !1,
         };
-      e != null &&
-        ((i.after = e), (i.before = null), (i.first = 50), (i.last = null));
+      let validCursor = (e && typeof e === "string" && e !== "undefined" && e !== "null") ? e : null;
+      if (validCursor) {
+        i.after = validCursor;
+        i.before = null;
+        i.first = 50;
+        i.last = null;
+      }
       let a = await t("7898261790222653", i);
       if (a.ok) {
         let r = await a.text(),
@@ -5488,12 +5630,14 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         id: this.userId,
         __relay_internal__pv__PolarisFeedShareMenurelayprovider: !1,
       };
-      if (
-        (e != null &&
-          ((o.after = e), (o.before = null), (o.first = 50), (o.last = null)),
-        (a = await t("7950326061742207", o)),
-        a.status === 429)
-      )
+      if (validCursor) {
+        o.after = validCursor;
+        o.before = null;
+        o.first = 50;
+        o.last = null;
+      }
+      a = await t("7950326061742207", o);
+      if (a.status === 429)
         throw (this.rateController.handle429("7950326061742207"), new Error(I));
       if (!a.ok) throw new Error("NETWORK_ERROR");
       return T(a);
@@ -5506,10 +5650,13 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         page_size: "50",
         include_feed_video: "1",
       };
-      e && (t.max_id = e);
+      if (e && typeof e === "string" && e !== "undefined" && e !== "null") {
+        t.max_id = e;
+      }
       let i = {
           "Content-Type": "application/x-www-form-urlencoded",
           "X-IG-App-ID": "936619743392459",
+          "X-ASBD-ID": "129477",
           "X-Requested-With": "XMLHttpRequest",
           Referer: `https://www.instagram.com/${this.username}/reels/`,
         },
@@ -5520,6 +5667,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         credentials: "include",
         headers: i,
         body: new URLSearchParams(t).toString(),
+        signal: AbortSignal.timeout(15000),
       });
       if (o.status === 429)
         throw (this.rateController.handle429("reels"), new Error(I));
@@ -5531,12 +5679,21 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         return e.items.map((i) => ({ node: i.media }));
       if (Array.isArray(e?.items) && e.items.length > 0)
         return e.items.map((i) => ({ node: i }));
+      let clipsConn = e?.data?.xdt_api__v1__clips__user__connection_v2 || e?.data?.xdt_api__v1__clips__user__connection;
+      if (clipsConn?.edges && Array.isArray(clipsConn.edges)) return clipsConn.edges;
       let t = e?.data?.xdt_api__v1__feed__user_timeline_graphql_connection;
       return t && Array.isArray(t.edges)
         ? t.edges
         : e?.data?.user?.edge_owner_to_timeline_media?.edges || [];
     }
     extractPageInfo(e) {
+      let clipsConn = e?.data?.xdt_api__v1__clips__user__connection_v2 || e?.data?.xdt_api__v1__clips__user__connection;
+      if (clipsConn?.page_info) {
+        return {
+          hasNextPage: clipsConn.page_info.has_next_page ?? false,
+          endCursor: clipsConn.page_info.end_cursor || null
+        };
+      }
       if (e?.paging_info)
         return {
           hasNextPage: e.paging_info.more_available ?? !1,
@@ -5560,19 +5717,24 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       };
     }
     normalizeNode(e) {
-      let likeCount = e.like_count ?? e.edge_media_preview_like?.count ?? e.edge_liked_by?.count ?? 0;
-      let playCount = e.play_count ?? e.view_count ?? e.video_play_count ?? 0;
-      let commentCount = e.comment_count ?? e.edge_media_to_comment?.count ?? 0;
-      let saveCount = e.save_count ?? e.edge_media_preview_save?.count ?? 0;
+      if (!e || typeof e !== "object") return e;
+      let likeCount = e.like_count ?? e.edge_media_preview_like?.count ?? e.edge_liked_by?.count ?? e.likeCount ?? 0;
+      let playCount = e.play_count ?? e.view_count ?? e.video_play_count ?? e.playCount ?? 0;
+      let commentCount = e.comment_count ?? e.edge_media_to_comment?.count ?? e.commentCount ?? 0;
+      let saveCount = e.save_count ?? e.edge_media_preview_save?.count ?? e.saveCount ?? 0;
       let captionText = "";
       if (e.caption && typeof e.caption === "object") {
         captionText = e.caption.text ?? "";
       } else if (typeof e.caption === "string") {
         captionText = e.caption;
       } else {
-        captionText = e.edge_media_to_caption?.edges?.[0]?.node?.text ?? "";
+        captionText = e.edge_media_to_caption?.edges?.[0]?.node?.text ?? e.captionText ?? "";
       }
-      if (e.shortcode != null || e.taken_at_timestamp != null) {
+      let takenAt = e.taken_at_timestamp ?? e.taken_at ?? e.timestamp ?? 0;
+      let isAlreadyGraphQL = (e.shortcode != null || e.taken_at_timestamp != null) && (e.display_url != null || e.video_url != null || e.edge_sidecar_to_children != null);
+      if (isAlreadyGraphQL) {
+        if (e.taken_at_timestamp === undefined) e.taken_at_timestamp = takenAt;
+        if (e.taken_at === undefined) e.taken_at = takenAt;
         if (e.likeCount === undefined) e.likeCount = likeCount;
         if (e.playCount === undefined) e.playCount = playCount;
         if (e.commentCount === undefined) e.commentCount = commentCount;
@@ -5583,13 +5745,14 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       let i =
           { 1: "GraphImage", 2: "GraphVideo", 8: "GraphSidecar" }[
             e.media_type
-          ] || "GraphImage",
+          ] || e.__typename || "GraphImage",
         a = {
-          shortcode: e.code ?? e.pk?.toString(),
-          id: e.pk?.toString(),
+          shortcode: e.code ?? e.shortcode ?? e.pk?.toString(),
+          id: e.pk?.toString() ?? e.id?.toString(),
           __typename: i,
-          is_video: e.media_type === 2,
-          taken_at_timestamp: e.taken_at ?? e.taken_at_timestamp ?? 0,
+          is_video: e.media_type === 2 || e.is_video === true,
+          taken_at_timestamp: takenAt,
+          taken_at: takenAt,
           likeCount: likeCount,
           playCount: playCount,
           commentCount: commentCount,
@@ -5598,26 +5761,32 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         },
         o = e.image_versions2?.candidates;
       o?.length && (a.display_url = o[0].url);
+      if (!a.display_url && e.display_url) a.display_url = e.display_url;
       let r = e.video_versions;
-      return (
-        Array.isArray(r) && r.length && (a.video_url = selectVideoUrl(r, e.video_url)),
-        e.carousel_media?.length &&
-          (a.edge_sidecar_to_children = {
-            edges: e.carousel_media.map((n) => ({
-              node: {
-                display_url: n.image_versions2?.candidates?.[0]?.url,
-                is_video: n.media_type === 2,
-                video_url: selectVideoUrl(n.video_versions, n.video_url),
-              },
-            })),
-          }),
-        a
-      );
+      if (Array.isArray(r) && r.length) {
+        a.video_url = selectVideoUrl(r, e.video_url);
+      } else if (e.video_url) {
+        a.video_url = e.video_url;
+      }
+      if (e.carousel_media?.length) {
+        a.edge_sidecar_to_children = {
+          edges: e.carousel_media.map((n) => ({
+            node: {
+              display_url: n.image_versions2?.candidates?.[0]?.url || n.display_url,
+              is_video: n.media_type === 2 || n.is_video === true,
+              video_url: selectVideoUrl(n.video_versions, n.video_url),
+            },
+          })),
+        };
+      } else if (e.edge_sidecar_to_children) {
+        a.edge_sidecar_to_children = e.edge_sidecar_to_children;
+      }
+      return a;
     }
     parsePostNode(e) {
       let t = this.normalizeNode(e),
         i = t.shortcode || t.id,
-        a = t.taken_at_timestamp || 0,
+        a = t.taken_at_timestamp || t.taken_at || t.timestamp || 0,
         o = t.__typename || "",
         r =
           o === "GraphSidecar" || t.edge_sidecar_to_children?.edges?.length > 0,
@@ -5648,9 +5817,15 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       };
     }
     parseMediaNodes(e, t, i, a) {
-      let o = e.is_video === !0 || e.__typename === "GraphVideo",
-        r = e.display_url || "",
-        n = e.video_url || "";
+      let o = e.is_video === !0 ||
+              e.__typename === "GraphVideo" ||
+              e.media_type === 2 ||
+              e.product_type === "clips" ||
+              (Array.isArray(e.video_versions) && e.video_versions.length > 0) ||
+              Boolean(e.video_url) ||
+              (e.video_duration && e.video_duration > 0),
+        r = e.display_url || (e.image_versions2?.candidates?.[0]?.url) || "",
+        n = e.video_url || (typeof selectVideoUrl === "function" ? selectVideoUrl(e.video_versions, e.video_url) : "") || "";
       return [
         {
           postId: t,
@@ -6558,6 +6733,47 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     scanQueue = [];
     maxConcurrentScans = 5;
     activeScanCount = 0;
+    async tryScrollScanFallback(task, abortToken, currentPosts, currentMedia) {
+      try {
+        let tabs = await chrome.tabs.query({});
+        let targetTab = tabs.find(t => t.url && t.url.toLowerCase().includes(task.username.toLowerCase())) ||
+                        tabs.find(t => t.url && /instagram\.com/i.test(t.url)) ||
+                        tabs[0];
+        if (!targetTab || !targetTab.id) return false;
+
+        let isVideosOnly = task.filter === "videos" || task.source === "reels";
+        this.sendProgress(task.username, {
+          taskId: task.taskId,
+          username: task.username,
+          status: "scanning",
+          posts: currentPosts,
+          media: currentMedia,
+          message: isVideosOnly ? "Buscando Reels na aba de vídeos..." : "Capturando publicações diretamente da página do Instagram...",
+        });
+
+        let res = await chrome.tabs.sendMessage(targetTab.id, {
+          type: "START_SCROLL_SCAN",
+          payload: {
+            taskId: task.taskId,
+            username: task.username,
+            topK: task.topK,
+            source: task.source,
+            filter: task.filter,
+            dateFilter: task.dateFilter,
+            minLikes: task.minLikes,
+            minViews: task.minViews,
+            minComments: task.minComments,
+            hashtag: task.hashtag,
+            minSaves: task.minSaves,
+          }
+        }).catch(() => null);
+
+        return res?.started === true;
+      } catch (err) {
+        console.warn("[Dog Saver] tryScrollScanFallback error:", err);
+        return false;
+      }
+    }
     async startScan(e) {
       this.scanQueue.push(e);
       this.processScanQueue();
@@ -6586,7 +6802,8 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       if (this.activeScans.has(e.taskId)) return;
       let t = { abort: !1 };
       this.activeScans.set(e.taskId, t);
-      let i = e.source === "reels" ? "reels" : "timeline",
+      let isVideosOnly = e.filter === "videos" || e.source === "reels";
+      let i = isVideosOnly ? "reels" : "timeline",
         a = new x();
       a.onWait = (g) => (
         this.sendProgress(e.username, {
@@ -6599,7 +6816,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         }),
         !t.abort
       );
-      let o = new pe(e.username, e.filter, e.dateFilter, i, a, e.csrfToken),
+      let o = new pe(e.username, e.filter, e.dateFilter, i, a, e.csrfToken, e.userId),
         r = new te(e.username),
         n = e.cursor,
         _ = e.seenPostCount,
@@ -6607,6 +6824,21 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         c = 0,
         d = e.topK ?? 0,
         u = this.getZipChunkSize();
+
+      if (e.onlyExtras) {
+        console.log(`[Dog Saver] Modo exclusivo Stories/Destaques para @${e.username}. Pulando varredura do feed/reels.`);
+        this.sendProgress(e.username, {
+          taskId: e.taskId,
+          username: e.username,
+          status: "processing",
+          posts: 0,
+          media: l,
+          oldestTs: 0,
+          zipChunkSize: u,
+          message: "Coletando Stories e Destaques..."
+        });
+        return;
+      }
 
       this.consecutiveFailed = 0;
 
@@ -6617,57 +6849,24 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       let cachedCursors = [];
       let cacheHasNextPage = true;
       if (cached && Array.isArray(cached.posts) && cached.posts.length > 0) {
-        cachedPosts = cached.posts;
-        cachedCursors = cached.cursors || [null];
+        cachedPosts = cached.posts.filter(p => {
+          let postCreator = p.creator || p.mediaItems?.[0]?.creator || "";
+          return !postCreator || postCreator.toLowerCase() === e.username.toLowerCase();
+        });
+        cachedCursors = Array.isArray(cached.cursors) ? cached.cursors.filter(Boolean) : [];
         cacheHasNextPage = cached.hasNextPage ?? true;
       }
 
       let isFirstPage = n === null;
       let initialPosts = [];
       
-      if (isFirstPage && cachedPosts.length > 0) {
+      if (isFirstPage && cachedPosts.length > 0 && !isVideosOnly) {
         initialPosts = cachedPosts;
-        n = cached.cursor;
+        let lastCachedCursor = cachedCursors.length > 0 
+          ? cachedCursors[cachedCursors.length - 1] 
+          : (cached.cursor || null);
+        n = lastCachedCursor;
         console.log(`[Dog Saver] Found ${cachedPosts.length} cached posts. Resuming from cursor: ${n}`);
-      } else if (isFirstPage && cachedCursors.length > 1) {
-        let cursorsToQuery = cachedCursors.slice(0, 5);
-        this.sendProgress(e.username, {
-          taskId: e.taskId,
-          username: e.username,
-          status: "scanning",
-          posts: _,
-          media: l,
-          oldestTs: c,
-          zipChunkSize: u,
-          message: `Carregando ${cursorsToQuery.length} páginas em paralelo...`,
-        });
-        try {
-          let promises = cursorsToQuery.map(cursor => o.fetchPage(cursor));
-          let pages = await Promise.all(promises);
-          let allPosts = [];
-          let lastPage = pages[pages.length - 1];
-          n = lastPage.cursor;
-          cacheHasNextPage = lastPage.hasNextPage;
-          for (let page of pages) {
-            if (page && Array.isArray(page.posts)) {
-              allPosts.push(...page.posts);
-            }
-          }
-          let seenShortcodes = new Set();
-          let uniquePosts = [];
-          for (let p of allPosts) {
-            let key = p.shortcode || p.postId;
-            if (key && !seenShortcodes.has(key)) {
-              seenShortcodes.add(key);
-              uniquePosts.push(p);
-            }
-          }
-          uniquePosts.sort((x, y) => (y.timestamp || 0) - (x.timestamp || 0));
-          initialPosts = uniquePosts;
-        } catch (err) {
-          console.error("[Dog Saver] Parallel scan failed, falling back to sequential:", err);
-          n = null;
-        }
       }
       try {
         for (; !t.abort; ) {
@@ -6679,50 +6878,52 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
             media: l,
             oldestTs: c,
             zipChunkSize: u,
-            message: n ? w("status_loading_next") : w("status_loading_first"),
+            message: isVideosOnly ? "Buscando Reels na aba de vídeos..." : (n ? w("status_loading_next") : w("status_loading_first")),
           });
           let g,
             y = 0,
             k = 2;
           if (isFirstPage && initialPosts.length > 0) {
+            let filteredInitial = [];
+            for (let p of initialPosts) {
+              let ts = p.timestamp || 0;
+              if (de(ts, e.dateFilter)) continue;
+              if (Ge(ts, e.dateFilter)) continue;
+              if (!Ee(ts, e.dateFilter)) continue;
+              if (o.shouldSkipByType(p)) continue;
+              filteredInitial.push(p);
+            }
             g = {
-              posts: initialPosts,
+              posts: filteredInitial,
               cursor: n,
-              hasNextPage: cacheHasNextPage && n !== null
+              hasNextPage: cacheHasNextPage && (n !== null && n !== undefined)
             };
             initialPosts = [];
             isFirstPage = false;
           } else {
-            for (let p = 0; !t.abort; p++)
+            try {
+              g = await o.fetchPage(n);
+            } catch (b) {
+              console.warn(`[Dog Saver] Requisição da API de background para @${e.username} falhou (${b.message}). Acionando captura instantânea na aba ativa...`);
+              let scrollStarted = await this.tryScrollScanFallback(e, t, _, l);
+              if (scrollStarted) return;
               try {
+                await new Promise(res => setTimeout(res, 1200));
+                if (t.abort) break;
                 g = await o.fetchPage(n);
-                break;
-              } catch (b) {
-                let E = b.message === I;
-                if (b.message === "NETWORK_ERROR") {
-                  if ((y++, y > k)) throw b;
-                  let q = 5 * y;
-                  (console.warn(
-                    `[Dog Saver] Network error, retry ${y}/${k} in ${q}s`,
-                  ),
-                    await this.sleep(q * 1e3, t));
-                  continue;
-                }
-                if (!E) throw b;
-                let ye = Math.min(5 + p * 10, 60);
-                for (let q = ye; q > 0 && !t.abort; q--)
-                  (this.sendProgress(e.username, {
-                    taskId: e.taskId,
-                    username: e.username,
-                    status: "rate_limited",
-                    posts: _,
-                    media: l,
-                    message: w("status_rate_limited_retry", { seconds: q }),
-                  }),
-                    await this.sleep(1e3, t));
+              } catch (err2) {
+                let scrollRetry = await this.tryScrollScanFallback(e, t, _, l);
+                if (scrollRetry) return;
+                throw new Error(`Não foi possível carregar as publicações pela API (${err2.message}).`);
               }
+            }
           }
-          if (t.abort || !g) break;
+          if (t.abort) break;
+          if (isFirstPage && g && (!g.posts || g.posts.length === 0) && !g.hasNextPage) {
+            let scrollStarted = await this.tryScrollScanFallback(e, t, _, l);
+            if (scrollStarted) return;
+          }
+          if (!g) break;
           if (n === null && o.profilePicUrl) {
             let p = {
               postId: "profile_avatar",
@@ -6760,9 +6961,18 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
                   (p.mediaItems = []));
               }
           }
-          if (t.abort) break;
-          let N = g.posts.filter((p) => p.mediaItems.length > 0),
-            oe = N.filter((p) => p.postId === "profile_avatar"),
+          let N = g.posts.filter((p) => p.mediaItems.length > 0);
+          if (e.filter === "photos") {
+            for (let p of N) {
+              p.mediaItems = p.mediaItems.filter((it) => it.type === "image");
+            }
+          } else if (e.filter === "videos") {
+            for (let p of N) {
+              p.mediaItems = p.mediaItems.filter((it) => it.type === "video");
+            }
+          }
+          N = N.filter((p) => p.mediaItems.length > 0);
+          let oe = e.filter === "videos" ? [] : N.filter((p) => p.postId === "profile_avatar"),
             C = N.filter((p) => p.postId !== "profile_avatar");
           let maxConsecutive = 20;
           if (
@@ -6828,12 +7038,25 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
             let p = d - _;
             p <= 0
               ? ((C = []), (z = !0))
-              : C.length > p && ((C = C.slice(0, p)), (z = !0));
+              : C.length >= p && ((C = C.slice(0, p)), (z = !0));
           }
           let Q = [...oe, ...C],
             R = await filterFreshMedia(e.taskId, Q.flatMap((p) => p.mediaItems)),
             fe = Q.map((p) => p.postId);
           ((_ += C.length), (l += R.length));
+
+          if (C.length > 0 && R.length === 0) {
+            this.consecutiveAlreadyDownloaded = (this.consecutiveAlreadyDownloaded || 0) + C.length;
+            if (this.consecutiveAlreadyDownloaded >= 15) {
+              console.log(`[Dog Saver] Encontrados ${this.consecutiveAlreadyDownloaded} posts já baixados anteriormente. Finalizando varredura incremental para @${e.username}.`);
+              z = !0;
+            }
+          } else if (R.length > 0) {
+            this.consecutiveAlreadyDownloaded = 0;
+          }
+          if (g.oldestPageTs && g.oldestPageTs > 0) {
+            (c === 0 || g.oldestPageTs < c) && (c = g.oldestPageTs);
+          }
           for (let p of Q)
             p.timestamp > 0 &&
               (c === 0 || p.timestamp < c) &&
@@ -6847,7 +7070,8 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
           );
           let $ = await this.taskManager.getTask(e.taskId);
           if ($.status === "stopped" || $.status === "paused") break;
-          let h = z || !g.hasNextPage || $.stopConditionHit;
+          let isTimelineComplete = !z && !g.hasNextPage && !$.stopConditionHit && i === "timeline" && (e.source ?? "profile") === "profile" && (e.filter === "all" || !e.filter);
+          let h = (z || !g.hasNextPage || $.stopConditionHit) && !isTimelineComplete;
           if (
             (this.sendProgress(e.username, {
               taskId: e.taskId,
@@ -6914,6 +7138,27 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
             }),
               this.activeScans.delete(e.taskId));
             return;
+          }
+          if (isTimelineComplete) {
+            console.log(`[Dog Saver] Varredura da grade principal concluída para @${e.username}. Iniciando varredura na aba de Reels para capturar vídeos fora do feed...`);
+            this.sendProgress(e.username, {
+              taskId: e.taskId,
+              username: e.username,
+              status: "scanning",
+              posts: _,
+              media: l,
+              oldestTs: c,
+              zipChunkSize: u,
+              message: "Buscando Reels na aba de vídeos...",
+            });
+            i = "reels";
+            o = new pe(e.username, e.filter, e.dateFilter, "reels", a, e.csrfToken, e.userId);
+            n = null;
+            isFirstPage = false;
+            this.consecutiveAlreadyDownloaded = 0;
+            let P = x.randomDelay();
+            await this.sleep(P * 1e3, t);
+            continue;
           }
           this.sendProgress(e.username, {
             taskId: e.taskId,
@@ -7323,20 +7568,37 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       return this.activeScans.has(e);
     }
     sendProgress(e, t) {
+      try {
+        fetch(`http://127.0.0.1:${VIRALDOG_LOCAL_API_PORT}/scan-progress`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(t)
+        }).catch(() => {});
+      } catch (err) {}
+
       chrome.tabs
-        .query({ url: `https://www.instagram.com/${e}/*` })
+        .query({ url: "*://*.instagram.com/*" })
         .then((i) => {
-          for (let a of i)
-            a.id &&
-              chrome.tabs
-                .sendMessage(a.id, { type: "SCAN_PROGRESS", payload: t })
-                .catch(() => {});
+          for (let a of i) {
+            if (!a.id) continue;
+            chrome.tabs
+              .sendMessage(a.id, { type: "SCAN_PROGRESS", payload: t })
+              .catch(() => {});
+          }
         })
         .catch(() => {});
     }
     sendProgressToAllTabs(e) {
+      try {
+        fetch(`http://127.0.0.1:${VIRALDOG_LOCAL_API_PORT}/scan-progress`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(e)
+        }).catch(() => {});
+      } catch (err) {}
+
       chrome.tabs
-        .query({ url: "https://www.instagram.com/*" })
+        .query({ url: "*://*.instagram.com/*" })
         .then((t) => {
           for (let i of t)
             i.id &&
@@ -7402,66 +7664,146 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     let i = t?.flatFolder,
       a = t?.collectionName,
       o = e.map((c) => {
+        if (s && (!c.creator || c.creator.toLowerCase() !== s.toLowerCase())) {
+          c.creator = s;
+        }
         let d = c.collectionName ?? a;
         return { url: c.url, path: d != null ? Ce(c, d, i, s) : re(c, i) };
       });
-    (await vt(), B++);
     let r = t?.signal;
     if (r?.aborted)
-      throw (B--, B === 0 && Se(), new DOMException("Aborted", "AbortError"));
-    let n = await new Promise((c, d) => {
-      (r &&
-        r.addEventListener(
-          "abort",
-          () => {
-            (chrome.runtime
-              .sendMessage({
-                type: "IG_SAVER_CANCEL_ZIP_BUILD",
-                taskId: t?.taskId,
-              })
-              .catch(() => {}),
-              d(new DOMException("Aborted", "AbortError")));
-          },
-          { once: !0 },
-        ),
+      throw new DOMException("Aborted", "AbortError");
+
+    let filename = t?.filename ?? `${s}_instagram.zip`;
+    // 1. Tentar gerar ZIP no Electron se a API local estiver disponível
+    try {
+      let res = await relayZipBuildToElectron({
+        username: s,
+        items: o,
+        filename,
+        taskId: t?.taskId,
+        concurrency: t?.concurrency || 4
+      });
+      if (res && (res.success || res.downloaded > 0)) {
+        return {
+          downloaded: res.downloaded ?? e.length,
+          failed: res.failed ?? 0
+        };
+      }
+    } catch (zipErr) {
+      // Electron build-zip não ativo, tentaremos gerar ZIP via Offscreen Document no navegador
+    }
+
+    // 2. Gerar arquivo ZIP no navegador via Offscreen Document (JSZip)
+    try {
+      B++;
+      await vt();
+      let zipRes = await new Promise((resolve, reject) => {
         chrome.runtime.sendMessage(
           {
             type: ft,
             username: s,
             items: o,
+            filename: filename,
             taskId: t?.taskId,
-            concurrency: t?.concurrency,
+            concurrency: t?.concurrency || 4
           },
-          (u) => {
-            chrome.runtime.lastError
-              ? d(new Error(chrome.runtime.lastError?.message))
-              : c(u ?? {});
-          },
-        ));
-    });
-    if (n.error || !n.url)
-      throw (
-        B--,
-        B === 0 && Se(),
-        new Error(n.error ?? w("error_zip_build_failed"))
-      );
-    let _ = n.url,
-      l = t?.filename ?? `${s}_instagram.zip`;
-    try {
-      return (
-        await relayDownloadToElectron({ url: _, filename: l }),
-        // The Electron bridge acknowledges before downloadURL has necessarily
-        // opened the blob. Keep it alive briefly so profile ZIPs are not
-        // revoked before the native download starts.
-        setTimeout(
-          () => chrome.runtime.sendMessage({ type: yt, url: _ }).catch(() => {}),
-          5000,
-        ),
-        { downloaded: n.downloaded ?? e.length, failed: n.failed ?? 0 }
-      );
+          (response) => {
+            if (chrome.runtime.lastError) {
+              reject(new Error(chrome.runtime.lastError.message));
+            } else if (response && response.error) {
+              reject(new Error(response.error));
+            } else if (response && (response.url || response.directDownloadTriggered)) {
+              resolve(response);
+            } else {
+              reject(new Error("OFFSCREEN_ZIP_BUILD_FAILED"));
+            }
+          }
+        );
+      });
+
+      if (zipRes && (zipRes.url || zipRes.directDownloadTriggered)) {
+        let blobUrl = zipRes.url;
+        if (!zipRes.directDownloadTriggered && blobUrl) {
+          await new Promise((resolve, reject) => {
+            chrome.downloads.download(
+              {
+                url: blobUrl,
+                filename: filename,
+                conflictAction: "uniquify"
+              },
+              (downloadId) => {
+                if (chrome.runtime.lastError || !downloadId) {
+                  reject(new Error(chrome.runtime.lastError?.message || "DOWNLOAD_FAILED"));
+                } else {
+                  resolve(downloadId);
+                }
+              }
+            );
+          });
+        }
+
+        setTimeout(() => {
+          if (blobUrl) chrome.runtime.sendMessage({ type: yt, url: blobUrl }).catch(() => {});
+        }, 30000);
+
+        return {
+          downloaded: zipRes.downloaded ?? e.length,
+          failed: zipRes.failed ?? 0
+        };
+      }
+    } catch (offscreenErr) {
+      console.warn("[Dog Saver] Falha no gerador de ZIP via Offscreen, baixando arquivos soltos:", offscreenErr.message);
     } finally {
-      (B--, B === 0 && Se());
+      B--;
+      if (B <= 0) {
+        Se().catch(() => {});
+      }
     }
+
+    // 3. Fallback Universal: Baixar cada arquivo diretamente para a pasta de Downloads
+    let downloaded = 0;
+    let failed = 0;
+    for (let item of o) {
+      if (r?.aborted) break;
+      try {
+        if (typeof chrome !== 'undefined' && chrome.downloads && typeof chrome.downloads.download === 'function') {
+          await new Promise((resolve, reject) => {
+            chrome.downloads.download({
+              url: item.url,
+              filename: item.path,
+              conflictAction: 'uniquify'
+            }, (downloadId) => {
+              if (chrome.runtime.lastError || !downloadId) {
+                reject(new Error(chrome.runtime.lastError?.message || 'DOWNLOAD_FAILED'));
+              } else {
+                resolve(downloadId);
+              }
+            });
+          });
+          downloaded++;
+        } else {
+          await relayDownloadToElectron({ url: item.url, filename: item.path });
+          downloaded++;
+        }
+      } catch (dlErr) {
+        console.warn(`[Dog Saver] Falha ao baixar ${item.path}:`, dlErr.message);
+        failed++;
+      }
+    }
+
+    if (downloaded === 0 && failed > 0) {
+      return {
+        error: "Falha ao salvar arquivos na máquina",
+        downloaded: 0,
+        failed: failed
+      };
+    }
+
+    return {
+      downloaded: downloaded,
+      failed: failed
+    };
   }
   var xe = "ig-saver-keepalive";
   function kt() {
@@ -7586,51 +7928,28 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     });
   }
   async function zt() {
-    let s = await chrome.storage.local.get([
-      f.legacyUser,
-      f.license,
-      f.activationId,
-      f.statusCache,
-      f.lastValidatedAt,
-    ]);
     return {
-      legacy: s[f.legacyUser] === !0,
-      license: typeof s[f.license] == "string" ? s[f.license] : null,
-      activationId:
-        typeof s[f.activationId] == "string" ? s[f.activationId] : null,
-      cache: s[f.statusCache] ?? null,
-      lastValidatedAt:
-        typeof s[f.lastValidatedAt] == "number" ? s[f.lastValidatedAt] : null,
+      legacy: true,
+      license: "PRO-VITALICIO",
+      activationId: "unlimited",
+      cache: { kind: "pro", expiresAt: null },
+      lastValidatedAt: Date.now(),
     };
   }
   async function Ae(s = {}, e) {
-    return { kind: "legacy" };
+    return { kind: "pro", expiresAt: null };
   }
   function ze(s) {
-    return !0;
+    return true;
   }
   async function _t() {
-    let e = (await chrome.storage.local.get(f.bulkAllTrialUsed))[
-      f.bulkAllTrialUsed
-    ];
-    return typeof e == "number" && e >= 0 ? e : 0;
+    return 0;
   }
   async function dt() {
-    let e = (await _t()) + 1;
-    return (await chrome.storage.local.set({ [f.bulkAllTrialUsed]: e }), e);
+    return 0;
   }
   async function ct(s, e) {
-    return ze(s)
-      ? { allowed: !0 }
-      : e.hasCustomRange
-        ? { allowed: !1, reason: "customRange" }
-        : e.topK !== void 0 && e.topK > st
-          ? { allowed: !1, reason: "topK", detail: String(st) }
-          : e.nDays !== void 0 && e.nDays !== null && e.nDays > ot
-            ? { allowed: !1, reason: "days", detail: String(ot) }
-            : e.isAllScope && (await _t()) >= rt
-              ? { allowed: !1, reason: "allTrialExhausted", detail: String(rt) }
-              : { allowed: !0 };
+    return { allowed: true };
   }
   var v = new le(),
     S,
@@ -7639,8 +7958,8 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     return et(v);
   }
   tt();
-  var De = 1e3,
-    V = 3,
+  var De = 0,
+    V = 8,
     A = new Map(),
     F = new Map(),
     W = new Map(),
@@ -7678,8 +7997,8 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
   }
   async function Rt() {
     let s = await m.getSettings();
-    ((De = s.zipChunkSize),
-      (V = s.concurrency),
+    ((De = 0),
+      (V = Math.max(s.concurrency || 8, 8)),
       (S = new _e(s)),
       S.setOnStatusChange((t) => {
         chrome.runtime
@@ -7733,7 +8052,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     }
     (await L(), await Ct(), console.log("[Dog Saver] Background initialized"));
   }
-  Rt();
+  let initPromise = Rt();
 
   async function Et(s, e, t, i, a) {
     if (se.has(s) && !i) return;
@@ -7754,7 +8073,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
           o?.source === "saved_collection" || o?.source === "saved_all"
             ? `${e}_saved`
             : `${e}_instagram`,
-        c = i && r === 1 ? `${l}.zip` : `${l}_part${r}.zip`,
+        c = (i && r === 1) || De === 0 ? `${l}.zip` : `${l}_part${r}.zip`,
         d = o?.source === "saved_collection" ? o.collectionName : void 0,
         { downloaded: u, failed: g } = await ie(e, t, {
           filename: `${e}/${c}`,
@@ -7799,15 +8118,289 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       m.deleteZipPartCounter(s).catch(() => {}));
   }
   Ye().catch(() => {});
+  // Canal KeepAlive para manter o Service Worker acordado no Electron durante a navegação
+  if (chrome.runtime && chrome.runtime.onConnect) {
+    chrome.runtime.onConnect.addListener((port) => {
+      if (port.name === "ig-saver-keepalive") {
+        port.onMessage.addListener((msg) => {
+          if (msg === "ping") {
+            try { port.postMessage("pong"); } catch {}
+          }
+        });
+        port.onDisconnect.addListener(() => {});
+      }
+    });
+  }
+
+  const ALLOWED_TIKTOK_MEDIA_HOSTS = [
+    "tiktok.com",
+    "tiktokcdn.com",
+    "tiktokcdn-us.com",
+    "tiktokv.com",
+    "byteoversea.com",
+    "byteimg.com",
+    "ibyteimg.com",
+    "muscdn.com",
+    "akamaized.net",
+  ];
+
+  function matchesTikTokHost(hostname, allowedHost) {
+    return hostname === allowedHost || hostname.endsWith(`.${allowedHost}`);
+  }
+
+  function isAllowedTikTokMediaUrl(value) {
+    try {
+      let url = new URL(String(value || ""));
+      return (
+        url.protocol === "https:" &&
+        ALLOWED_TIKTOK_MEDIA_HOSTS.some((host) => matchesTikTokHost(url.hostname, host))
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function isAllowedTikTokZipUrl(value) {
+    return (
+      isAllowedTikTokMediaUrl(value) ||
+      /^data:application\/json;base64,[a-z0-9+/=]+$/i.test(String(value || ""))
+    );
+  }
+
+  let creatingTikTokOffscreenDocument;
+
+  async function hasTikTokOffscreenDocument() {
+    if (!chrome.runtime.getContexts) return false;
+    try {
+      const contexts = await chrome.runtime.getContexts({
+        contextTypes: ["OFFSCREEN_DOCUMENT"],
+        documentUrls: [chrome.runtime.getURL("offscreen.html")],
+      });
+      return contexts.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  async function ensureTikTokOffscreenDocument() {
+    if (await hasTikTokOffscreenDocument()) return;
+    if (creatingTikTokOffscreenDocument) return creatingTikTokOffscreenDocument;
+
+    creatingTikTokOffscreenDocument = chrome.offscreen
+      .createDocument({
+        url: "offscreen.html",
+        reasons: ["BLOBS"],
+        justification: "Preparar mídias e arquivos ZIP de downloads do TikTok.",
+      })
+      .catch(async (error) => {
+        if (!(await hasTikTokOffscreenDocument())) throw error;
+      })
+      .finally(() => {
+        creatingTikTokOffscreenDocument = undefined;
+      });
+
+    return creatingTikTokOffscreenDocument;
+  }
+
+  function sendTikTokRuntimeMessage(message) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(message, (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve(response || {});
+      });
+    });
+  }
+
+  function startTikTokDownload(options) {
+    return new Promise((resolve, reject) => {
+      chrome.downloads.download(options, (downloadId) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        if (downloadId === undefined) {
+          reject(new Error("DOWNLOAD_FAILED"));
+          return;
+        }
+        resolve(downloadId);
+      });
+    });
+  }
+
+  function sanitizeTikTokFilename(filename) {
+    return String(filename || "Dog_Saver_TikTok.zip").replace(
+      /[<>:"/\\|?*\x00-\x1f]/g,
+      "_",
+    );
+  }
+
+  async function downloadPreparedTikTokFile(filename, sourceUrls, expectedType) {
+    let urls = Array.from(
+      new Set((Array.isArray(sourceUrls) ? sourceUrls : [sourceUrls]).filter(Boolean)),
+    );
+    if (!urls.length || urls.some((url) => !isAllowedTikTokMediaUrl(url))) {
+      throw new Error("URL de mídia do TikTok não permitida");
+    }
+
+    await ensureTikTokOffscreenDocument();
+    let mediaResult = await sendTikTokRuntimeMessage({
+      type: "TIKTOK_FETCH_MEDIA_AND_CREATE_URL",
+      urls,
+      expectedType: expectedType === "image" ? "image" : "video",
+    });
+    if (mediaResult.error || !mediaResult.url) {
+      throw new Error(mediaResult.error || "Não foi possível preparar a mídia");
+    }
+
+    try {
+      let downloadId = await startTikTokDownload({
+        url: mediaResult.url,
+        filename: sanitizeTikTokFilename(filename || "Dog_Saver_TikTok"),
+        saveAs: false,
+        conflictAction: "uniquify",
+      });
+      return {
+        downloadId,
+        contentType: mediaResult.contentType,
+        size: mediaResult.size,
+      };
+    } finally {
+      chrome.runtime
+        .sendMessage({ type: "IG_SAVER_REVOKE_BLOB_URL", url: mediaResult.url })
+        .catch(() => {});
+    }
+  }
+
+  async function downloadPreparedTikTokZip(filename, sourceItems) {
+    const items = [];
+    for (let item of sourceItems || []) {
+      if (typeof item?.path !== "string" || !item.path.length) continue;
+      let urls = Array.from(
+        new Set(
+          [
+            ...(Array.isArray(item.urls) ? item.urls : []),
+            item.url,
+          ].filter((url) => isAllowedTikTokMediaUrl(url)),
+        ),
+      );
+      if (urls.length) {
+        items.push({
+          urls,
+          path: item.path,
+          expectedType:
+            item.expectedType === "image" ||
+            /\.(?:avif|jpe?g|png|webp)$/i.test(item.path)
+              ? "image"
+              : "video",
+        });
+      } else if (
+        typeof item.url === "string" &&
+        isAllowedTikTokZipUrl(item.url)
+      ) {
+        items.push({ url: item.url, path: item.path });
+      }
+    }
+
+    if (!items.length) throw new Error("Nenhum arquivo válido para o ZIP");
+
+    await ensureTikTokOffscreenDocument();
+    const mediaItems = items.filter((item) => item.urls),
+      localItems = items.filter((item) => !item.urls),
+      preparedItems = [],
+      preparedUrls = [],
+      preparationErrors = [],
+      concurrency = Math.min(3, Math.max(1, mediaItems.length));
+    let cursor = 0;
+
+    await Promise.all(
+      Array.from({ length: concurrency }, async () => {
+        while (cursor < mediaItems.length) {
+          let item = mediaItems[cursor++];
+          try {
+            let mediaResult = await sendTikTokRuntimeMessage({
+              type: "TIKTOK_FETCH_MEDIA_AND_CREATE_URL",
+              urls: item.urls,
+              expectedType: item.expectedType,
+            });
+            if (mediaResult.error || !mediaResult.url) {
+              throw new Error(mediaResult.error || "Mídia indisponível");
+            }
+            preparedItems.push({ url: mediaResult.url, path: item.path });
+            preparedUrls.push(mediaResult.url);
+          } catch (error) {
+            preparationErrors.push({ path: item.path, error: error.message });
+          }
+        }
+      }),
+    );
+
+    if (mediaItems.length && !preparedItems.length) {
+      throw new Error(
+        "Não foi possível baixar os vídeos do TikTok para montar o ZIP",
+      );
+    }
+
+    let zipResult;
+    try {
+      zipResult = await sendTikTokRuntimeMessage({
+        type: "IG_SAVER_BUILD_ZIP_AND_CREATE_URL",
+        username: "tiktok",
+        items: [...preparedItems, ...localItems],
+        taskId: `tiktok-${Date.now()}`,
+        concurrency: 3,
+      });
+    } finally {
+      for (let url of preparedUrls) {
+        chrome.runtime
+          .sendMessage({ type: "IG_SAVER_REVOKE_BLOB_URL", url })
+          .catch(() => {});
+      }
+    }
+
+    if (zipResult.error || !zipResult.url) {
+      throw new Error(zipResult.error || "Não foi possível montar o ZIP");
+    }
+    if (
+      preparedItems.length &&
+      (zipResult.failed ?? 0) >= preparedItems.length
+    ) {
+      chrome.runtime
+        .sendMessage({ type: "IG_SAVER_REVOKE_BLOB_URL", url: zipResult.url })
+        .catch(() => {});
+      throw new Error("O ZIP não recebeu nenhuma mídia do TikTok");
+    }
+
+    try {
+      await startTikTokDownload({
+        url: zipResult.url,
+        filename: sanitizeTikTokFilename(filename),
+        saveAs: false,
+        conflictAction: "uniquify",
+      });
+    } finally {
+      chrome.runtime
+        .sendMessage({ type: "IG_SAVER_REVOKE_BLOB_URL", url: zipResult.url })
+        .catch(() => {});
+    }
+
+    return {
+      downloaded: zipResult.downloaded ?? preparedItems.length + localItems.length,
+      failed: (zipResult.failed ?? 0) + preparationErrors.length,
+    };
+  }
+
   chrome.runtime.onMessage.addListener((s, e, t) => {
     let i = s.type;
-    if (typeof i == "string" && i.startsWith("TIKTOK_")) return !1;
     if (
       i === "IG_SAVER_BUILD_ZIP_AND_CREATE_URL" ||
       i === "IG_SAVER_REVOKE_BLOB_URL" ||
-      i === "IG_SAVER_CANCEL_ZIP_BUILD"
+      i === "IG_SAVER_CANCEL_ZIP_BUILD" ||
+      i === "TIKTOK_FETCH_MEDIA_AND_CREATE_URL"
     )
-      return !0;
+      return !1;
     if (i === "IG_SAVER_ZIP_PROGRESS") {
       let {
         taskId: a,
@@ -7849,6 +8442,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     );
   });
   async function Gt(s, e) {
+    if (initPromise) await initPromise;
     switch (
       (console.log(
         "[Dog Saver] handleMessage type:",
@@ -7868,43 +8462,195 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
           flatFolder: n,
           source: _,
           csrfToken: l,
+          userId: userId,
+          profilePicUrl: profilePicUrl,
           minLikes: minLikes,
           minViews: minViews,
           minComments: minComments,
           hashtag: hashtag,
           minSaves: minSaves,
+          onlyExtras: onlyExtras,
         } = s.payload;
-        if ((_ ?? "profile") === "profile") {
-          let u = await Ae(),
-            g = {
-              topK: r,
-              nDays: a?.mode === "lastNDays" ? a.nDays : null,
-              hasCustomRange: a?.mode === "range",
-              isAllScope: a?.mode === "all" && (r ?? 0) === 0,
-            },
-            y = await ct(u, g);
-          if (!y.allowed)
-            return {
-              error: "pro_required",
-              reason: y.reason,
-              detail: y.detail,
-            };
-        }
         let d = await v.createTask(t, i, a, o, r, n);
         return (
           (d.source = _ ?? "profile"),
           l && (d.csrfToken = l),
+          userId && (d.userId = userId),
+          profilePicUrl && (d.profilePicUrl = profilePicUrl),
           (d.minLikes = minLikes),
           (d.minViews = minViews),
           (d.minComments = minComments),
           (d.minSaves = minSaves),
           (d.hashtag = hashtag),
+          (d.onlyExtras = !!onlyExtras),
           await m.saveTask(d),
           d.downloadAsZip && A.set(d.taskId, []),
           await L(),
           D.startScan(d),
           { task: d }
         );
+      }
+      case "INGEST_EXTRAS_ITEMS": {
+        let { taskId, username, items, isFinal } = s.payload;
+        let task = await v.getTask(taskId);
+        if (!task || task.status === "stopped" || task.status === "paused") {
+          return { ok: false };
+        }
+        if (Array.isArray(items) && items.length > 0) {
+          let freshMedia = await filterFreshMedia(taskId, items);
+          if (freshMedia.length > 0) {
+            let acc = D.zipAccumulator.get(taskId) ?? [];
+            acc.push(...freshMedia);
+            D.zipAccumulator.set(taskId, acc);
+            await m.saveZipAccumulator(taskId, acc);
+            let u = D.getZipChunkSize();
+            let chunk;
+            while ((chunk = Pe(acc, u)) !== null) {
+              D.zipAccumulator.set(taskId, acc);
+              await m.saveZipAccumulator(taskId, acc);
+              D.enqueueChunkBuild(taskId, username, chunk, false, task.flatFolder);
+            }
+            let curMedia = (task.totalMediaFound || 0) + freshMedia.length;
+            await v.updateTaskProgress(taskId, null, freshMedia.map(p => p.postId), freshMedia.length, 0);
+            D.sendProgress(username, {
+              taskId,
+              username,
+              status: "processing",
+              posts: task.seenPostCount || 0,
+              media: curMedia,
+              zipChunkSize: u,
+              message: `Stories / Destaques adicionados ao pacote (+${freshMedia.length})`
+            });
+          }
+        }
+        if (isFinal || task.onlyExtras) {
+          let acc = D.zipAccumulator.get(taskId) ?? [];
+          let remaining = acc.splice(0);
+          D.zipAccumulator.delete(taskId);
+          await m.deleteZipAccumulator(taskId);
+          if (remaining.length > 0) {
+            D.enqueueChunkBuild(taskId, username, remaining, true, task.flatFolder);
+          } else {
+            let lastQueue = D.zipBuildQueue.get(taskId);
+            if (lastQueue) await lastQueue;
+            D.cleanupZipState(taskId);
+            await v.completeTask(taskId);
+            D.sendProgress(username, {
+              taskId,
+              username,
+              status: "done",
+              posts: 0,
+              media: task.totalMediaFound || 0,
+              oldestTs: 0,
+              message: "Download de Stories / Destaques concluído!"
+            });
+          }
+        }
+        return { ok: true };
+      }
+      case "INGEST_SCROLL_POSTS": {
+        let { taskId, username, posts, isDone } = s.payload;
+        let task = await v.getTask(taskId);
+        if (!task || task.status === "stopped" || task.status === "paused") {
+          return { ok: false };
+        }
+
+        let resolver = new te(username);
+        let resolvedPosts = [];
+        let maxAllowed = (task.topK && task.topK > 0) ? Math.max(0, task.topK - (task.seenPostCount || 0)) : 999999;
+        
+        for (let p of (posts || [])) {
+          if (maxAllowed <= 0) break;
+          try {
+            let items = p.isReel 
+              ? await resolver.resolveReel(p.shortcode) 
+              : await resolver.resolvePost(p.shortcode);
+            if (items && items.length > 0) {
+              if (task.filter === "photos") items = items.filter(it => it.type === "image");
+              else if (task.filter === "videos") items = items.filter(it => it.type === "video");
+              
+              let postTs = items[0]?.timestamp || Math.floor(Date.now() / 1000);
+              if (task.dateFilter && !Ee(postTs, task.dateFilter)) {
+                continue;
+              }
+              
+              if (items.length > 0) {
+                resolvedPosts.push({
+                  postId: p.shortcode,
+                  shortcode: p.shortcode,
+                  mediaItems: items,
+                  timestamp: postTs
+                });
+                maxAllowed--;
+              }
+            }
+          } catch (err) {
+            console.warn(`[Dog Saver] Falha ao resolver post do scroll ${p.shortcode}:`, err.message);
+          }
+        }
+
+        if (resolvedPosts.length > 0) {
+          let mediaItems = resolvedPosts.flatMap(p => p.mediaItems);
+          let freshMedia = await filterFreshMedia(taskId, mediaItems);
+          let u = D.getZipChunkSize();
+          
+          if (freshMedia.length > 0) {
+            let acc = D.zipAccumulator.get(taskId) ?? [];
+            acc.push(...freshMedia);
+            D.zipAccumulator.set(taskId, acc);
+            await m.saveZipAccumulator(taskId, acc);
+            
+            let chunk;
+            while ((chunk = Pe(acc, u)) !== null) {
+              D.zipAccumulator.set(taskId, acc);
+              await m.saveZipAccumulator(taskId, acc);
+              D.enqueueChunkBuild(taskId, username, chunk, false, task.flatFolder);
+            }
+          }
+
+          let curPosts = (task.seenPostCount || 0) + resolvedPosts.length;
+          let curMedia = (task.totalMediaFound || 0) + freshMedia.length;
+          await v.updateTaskProgress(taskId, null, resolvedPosts.map(p => p.postId), freshMedia.length, 0);
+          
+          D.sendProgress(username, {
+            taskId,
+            username,
+            status: "processing",
+            posts: curPosts,
+            media: curMedia,
+            zipChunkSize: u,
+            message: `Capturando e preparando vídeos... (${curPosts} encontrados)`
+          });
+        }
+
+        let isTargetReached = (task.topK && task.topK > 0 && ((task.seenPostCount || 0) + resolvedPosts.length >= task.topK));
+        if (isDone || isTargetReached) {
+          let acc = D.zipAccumulator.get(taskId) ?? [];
+          let remaining = acc.splice(0);
+          D.zipAccumulator.delete(taskId);
+          await m.deleteZipAccumulator(taskId);
+          
+          if (remaining.length > 0) {
+            D.enqueueChunkBuild(taskId, username, remaining, true, task.flatFolder);
+          }
+          let zipQueue = D.zipBuildQueue.get(taskId);
+          if (zipQueue) await zipQueue;
+          D.cleanupZipState(taskId);
+          let completed = await v.completeTask(taskId);
+          D.onTaskCompleted && (await D.onTaskCompleted(completed));
+          await D.syncKeepAlive();
+          
+          D.sendProgress(username, {
+            taskId,
+            username,
+            status: "done",
+            posts: (task.seenPostCount || 0) + resolvedPosts.length,
+            media: task.totalMediaFound || 0,
+            message: "Downloads concluídos!"
+          });
+        }
+
+        return { ok: true };
       }
       case "START_SAVED_DOWNLOAD": {
         console.log(
@@ -7963,13 +8709,46 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         try {
           return {
             success: !0,
-            downloadId: await relayDownloadToElectron({
+            downloadId: await chrome.downloads.download({
               url: i,
-              filename: `${t}/${t}_avatar.jpg`,
+              filename: `${t}_avatar.jpg`,
             }),
           };
         } catch (a) {
           return { error: a.message };
+        }
+      }
+      case "DOWNLOAD_SINGLE_MEDIA": {
+        let { username: t, postId: i, media: m, filename: f, url: u } = s.payload || {};
+        let mediaUrl = m?.url || u;
+        if (!mediaUrl) return { error: w("error_no_media_items") };
+        let finalFilename = f;
+        if (!finalFilename) {
+          let mediaType = m?.type || "video";
+          let ext = j(mediaType, mediaUrl);
+          let ts = m?.timestamp ?? Math.floor(Date.now() / 1e3);
+          let dateObj = new Date(ts * 1e3);
+          let year = dateObj.getUTCFullYear();
+          let month = String(dateObj.getUTCMonth() + 1).padStart(2, "0");
+          let day = String(dateObj.getUTCDate()).padStart(2, "0");
+          let hour = String(dateObj.getUTCHours()).padStart(2, "0");
+          let min = String(dateObj.getUTCMinutes()).padStart(2, "0");
+          let dateStr = `${year}${month}${day}_${hour}${min}`;
+          let safeUsername = String(t || "unknown").replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/\.+$/, "").trim() || "unknown";
+          let safePostId = String(i || "media").replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/\.+$/, "").trim() || "media";
+          finalFilename = safeUsername && safeUsername !== "unknown"
+            ? `${safeUsername}/${dateStr}_${safePostId}.${ext}`
+            : `${dateStr}_${safePostId}.${ext}`;
+        }
+        try {
+          let downloadId = await chrome.downloads.download({
+            url: mediaUrl,
+            filename: finalFilename,
+            conflictAction: "uniquify"
+          });
+          return { success: !0, downloadId };
+        } catch (err) {
+          return { error: err.message };
         }
       }
       case "DOWNLOAD_POST_AS_ZIP": {
@@ -8011,7 +8790,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
           let baseFilename = i.length === 1 ? `${dateStr}_${t}.${_}` : `${dateStr}_${t}_${n.index}.${_}`;
           let filename = a && a !== "unknown" ? `${a}/${baseFilename}` : baseFilename;
           try {
-            await relayDownloadToElectron({ url: n.url, filename: filename });
+            await chrome.downloads.download({ url: n.url, filename: filename });
           } catch (c) {
             r.push(c.message);
           }
@@ -8032,10 +8811,10 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         if (a.length === 1) {
           let d = a[0],
             u = j(d.type, d.url),
-            g = t && t !== "unknown" ? `${t}/stories/${dateStr}_story_${i}.${u}` : `stories/${dateStr}_story_${i}.${u}`;
+            g = t && t !== "unknown" ? `${t}/${dateStr}_story_${i}.${u}` : `${dateStr}_story_${i}.${u}`;
           try {
             return (
-              await relayDownloadToElectron({ url: d.url, filename: g }),
+              await chrome.downloads.download({ url: d.url, filename: g }),
               { downloaded: 1, failed: 0 }
             );
           } catch (y) {
@@ -8043,7 +8822,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
           }
         }
         try {
-          let zipFilename = t && t !== "unknown" ? `${t}/stories/${dateStr}_story_${i}.zip` : `stories/${dateStr}_story_${i}.zip`;
+          let zipFilename = t && t !== "unknown" ? `${t}/${dateStr}_story_${i}.zip` : `${dateStr}_story_${i}.zip`;
           return await ie(t, a, {
             filename: zipFilename,
             concurrency: V,
@@ -8237,6 +9016,20 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
           (V = t.concurrency),
           { settings: t }
         );
+      }
+      case "TIKTOK_CHECK_PRO":
+        return { pro: true, kind: "pro" };
+      case "TIKTOK_DOWNLOAD_FILE": {
+        let { expectedType, filename, url, urls } = s.payload || {};
+        return await downloadPreparedTikTokFile(
+          filename,
+          urls || url,
+          expectedType,
+        );
+      }
+      case "TIKTOK_DOWNLOAD_ZIP": {
+        let { filename, items } = s.payload || {};
+        return await downloadPreparedTikTokZip(filename, items);
       }
       default:
         return (

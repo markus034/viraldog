@@ -13,10 +13,21 @@
     "tabs"
   ],
   "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
     "https://www.instagram.com/*",
     "https://*.cdninstagram.com/*",
     "https://*.fbcdn.net/*",
-    "https://api.polar.sh/*"
+    "https://api.polar.sh/*",
+    "https://*.tiktok.com/*",
+    "https://*.tiktokcdn.com/*",
+    "https://*.tiktokcdn-us.com/*",
+    "https://*.tiktokv.com/*",
+    "https://*.byteoversea.com/*",
+    "https://*.byteimg.com/*",
+    "https://*.ibyteimg.com/*",
+    "https://*.muscdn.com/*",
+    "https://*.akamaized.net/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -40,9 +51,38 @@
         "instagram/content.js"
       ],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.tiktok.com/*",
+        "https://*.tiktok.com/*"
+      ],
+      "js": [
+        "tiktok/media-validation.js",
+        "tiktok/parser.js",
+        "tiktok/interceptor.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://www.tiktok.com/*",
+        "https://*.tiktok.com/*"
+      ],
+      "js": [
+        "tiktok/parser.js",
+        "tiktok/profile-filters.js",
+        "tiktok/content.js"
+      ],
+      "css": [
+        "tiktok/content.css"
+      ],
+      "run_at": "document_idle"
     }
   ],
   "action": {
+    "default_popup": "popup.html",
     "default_icon": {
       "16": "assets/icon16.png",
       "24": "assets/icon24.png",
@@ -64,6 +104,16 @@
       ],
       "matches": [
         "https://www.instagram.com/*"
+      ]
+    },
+    {
+      "resources": [
+        "tiktok/media-validation.js",
+        "tiktok/parser.js",
+        "tiktok/interceptor.js"
+      ],
+      "matches": [
+        "https://*.tiktok.com/*"
       ]
     }
   ]

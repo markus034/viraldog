@@ -7,11 +7,12 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Form, UploadFile, File, Request
 from sqlalchemy.orm import Session
 from database import get_db, Post, Account, APP_DATA_DIR
-from schemas import SchedulePostRequest, BulkScheduleRequest, AIRequest, RepostRequest
+from schemas import SchedulePostRequest, BulkScheduleRequest, AIRequest, RepostRequest, ReschedulePostRequest
 from routers.auth import get_current_user
 import backend_ai_service as ai_service
 import backend_publisher as publisher
 import backend_analytics as analytics
+import cloud_worker_client
 
 router = APIRouter(tags=["publishing"])
 
@@ -68,18 +69,19 @@ def schedule_post(req: SchedulePostRequest, request: Request, db: Session = Depe
     owner_user_id = str(user.id) if user else "default"
 
     ig_user_id = None
+    target_acc = None
     if req.account_username:
         clean_user = req.account_username.strip().lstrip('@')
-        acc = db.query(Account).filter((Account.username == clean_user) | (Account.display_name == req.account_username)).first()
-        if not acc:
+        target_acc = db.query(Account).filter((Account.username == clean_user) | (Account.display_name == req.account_username)).first()
+        if not target_acc:
             raise HTTPException(status_code=400, detail=f"Conta {req.account_username} não encontrada.")
         
         # Validar contas oficiais vs modo cookie
-        if acc.auth_mode == "official" or acc.fb_access_token or acc.access_token:
-            if getattr(acc, 'revoked', False):
+        if target_acc.auth_mode == "official" or target_acc.fb_access_token or target_acc.access_token:
+            if getattr(target_acc, 'revoked', False):
                 raise HTTPException(status_code=400, detail=f"A conta @{req.account_username} foi desautorizada na Meta. Reconecte nas Definições.")
-            ig_user_id = acc.ig_user_id or acc.fb_ig_account_id
-        elif not acc.session_cookies:
+            ig_user_id = target_acc.ig_user_id or target_acc.fb_ig_account_id
+        elif not target_acc.session_cookies:
             raise HTTPException(
                 status_code=400,
                 detail=f"A conta @{req.account_username} não possui sessão ativa ou token da Meta configurado."
@@ -94,11 +96,35 @@ def schedule_post(req: SchedulePostRequest, request: Request, db: Session = Depe
         owner_user_id=owner_user_id,
         video_path=req.video_path, caption=req.caption, scheduled_time=dt_utc,
         account_username=req.account_username, ig_user_id=ig_user_id, status="pending", post_type=req.post_type,
-        carousel_image_paths=json.dumps(req.carousel_image_paths) if req.carousel_image_paths else None
+        carousel_image_paths=json.dumps(req.carousel_image_paths) if req.carousel_image_paths else None,
+        is_cloud_scheduled=False
     )
     db.add(post)
     db.commit()
-    return {"status": "success", "post_id": post.id}
+    db.refresh(post)
+
+    # Se Cloud Worker configurado e conta for Oficial Meta, despachar para Nuvem 24/7
+    cloud_synced = False
+    if target_acc and (target_acc.auth_mode == "official" or target_acc.fb_access_token or target_acc.access_token) and cloud_worker_client.is_cloud_worker_configured(db):
+        try:
+            ok, job_id, err = cloud_worker_client.schedule_job_to_cloud(post, target_acc, db)
+            if ok and job_id:
+                post.is_cloud_scheduled = True
+                post.cloud_job_id = job_id
+                db.commit()
+                cloud_synced = True
+                print(f"[Publishing] Post #{post.id} despachado para Cloud Worker (Job #{job_id}).")
+            else:
+                print(f"[Publishing] Não foi possível despachar para o Cloud Worker: {err}. Post continuará no agendador local.")
+        except Exception as c_err:
+            print(f"[Publishing] Falha ao enviar para Cloud Worker: {c_err}")
+
+    return {
+        "status": "success",
+        "post_id": post.id,
+        "is_cloud_scheduled": cloud_synced,
+        "cloud_job_id": post.cloud_job_id
+    }
 
 
 @router.post("/api/posts/bulk")
@@ -109,19 +135,20 @@ def bulk_schedule_posts(req: BulkScheduleRequest, request: Request, db: Session 
     user = get_current_user(request, db)
     owner_user_id = str(user.id) if user else "default"
 
-    created_ids = []
+    created_posts = []
 
     for item in req.posts:
         ig_user_id = None
+        target_acc = None
         if item.account_username:
             clean_user = item.account_username.strip().lstrip('@')
-            acc = db.query(Account).filter((Account.username == clean_user) | (Account.display_name == item.account_username)).first()
-            if acc:
-                if acc.auth_mode == "official" or acc.fb_access_token or acc.access_token:
-                    if getattr(acc, 'revoked', False):
+            target_acc = db.query(Account).filter((Account.username == clean_user) | (Account.display_name == item.account_username)).first()
+            if target_acc:
+                if target_acc.auth_mode == "official" or target_acc.fb_access_token or target_acc.access_token:
+                    if getattr(target_acc, 'revoked', False):
                         raise HTTPException(status_code=400, detail=f"A conta {item.account_username} foi desautorizada na Meta. Reconecte.")
-                    ig_user_id = acc.ig_user_id or acc.fb_ig_account_id
-                elif not acc.session_cookies:
+                    ig_user_id = target_acc.ig_user_id or target_acc.fb_ig_account_id
+                elif not target_acc.session_cookies:
                     raise HTTPException(
                         status_code=400,
                         detail=f"A conta {item.account_username} não possui sessão de cookies salva ou token da Meta."
@@ -132,25 +159,56 @@ def bulk_schedule_posts(req: BulkScheduleRequest, request: Request, db: Session 
         except Exception:
             raise HTTPException(status_code=400, detail=f"Data/hora inválida para o vídeo: {item.video_path}")
 
+        carousel_json = json.dumps(item.carousel_image_paths) if item.carousel_image_paths else None
         post = Post(
             owner_user_id=owner_user_id,
             video_path=item.video_path,
+            carousel_image_paths=carousel_json,
             caption=item.caption,
             scheduled_time=dt_utc,
             account_username=item.account_username,
             ig_user_id=ig_user_id,
             status="pending",
-            post_type=item.post_type or "reel"
+            post_type=item.post_type or "reel",
+            is_cloud_scheduled=False
         )
         db.add(post)
-        created_ids.append(post)
+        created_posts.append((post, target_acc))
 
     db.commit()
-    return {"status": "success", "count": len(created_ids)}
+
+    # Despachar posts para Cloud Worker se configurado
+    cloud_worker_ok = cloud_worker_client.is_cloud_worker_configured(db)
+    for post, acc in created_posts:
+        db.refresh(post)
+        if cloud_worker_ok and acc and (acc.auth_mode == "official" or acc.fb_access_token or acc.access_token):
+            try:
+                ok, job_id, err = cloud_worker_client.schedule_job_to_cloud(post, acc, db)
+                if ok and job_id:
+                    post.is_cloud_scheduled = True
+                    post.cloud_job_id = job_id
+            except Exception as ex:
+                print(f"[Bulk Schedule] Erro ao despachar post #{post.id} para cloud: {ex}")
+    
+    db.commit()
+    return {"status": "success", "count": len(created_posts)}
+
+
+@router.post("/api/posts/sync-cloud")
+def sync_cloud_posts(request: Request, db: Session = Depends(get_db)):
+    """Sincroniza status de posts da Nuvem com o banco de dados local."""
+    return cloud_worker_client.sync_cloud_jobs(db)
 
 
 @router.get("/api/posts")
 def list_posts(request: Request, db: Session = Depends(get_db)):
+    # Tenta sincronizar silenciosamente com o Cloud Worker se configurado
+    if cloud_worker_client.is_cloud_worker_configured(db):
+        try:
+            cloud_worker_client.sync_cloud_jobs(db)
+        except Exception:
+            pass
+
     user = get_current_user(request, db)
     query = db.query(Post)
     if user:
@@ -175,7 +233,11 @@ def list_posts(request: Request, db: Session = Depends(get_db)):
         "is_repost": p.is_repost, "engagement_score": p.engagement_score,
         "cross_post_targets": json.loads(p.cross_post_targets) if p.cross_post_targets else [],
         "created_at": p.created_at.isoformat() if p.created_at else None,
+        "published_at": p.published_at.isoformat() if p.published_at else None,
+        "is_cloud_scheduled": bool(p.is_cloud_scheduled),
+        "cloud_job_id": p.cloud_job_id,
     } for p in posts]
+
 
 
 @router.post("/api/posts/{post_id}/retry")
@@ -205,6 +267,28 @@ def retry_post(post_id: int, request: Request, db: Session = Depends(get_db)):
         post.scheduled_time = now
     db.commit()
     return {"status": "success", "post_id": post.id}
+
+
+@router.patch("/api/posts/{post_id}")
+def update_post_schedule(post_id: int, req: ReschedulePostRequest, request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
+    post = db.query(Post).filter(Post.id == post_id).first()
+    if not post:
+        raise HTTPException(status_code=404, detail="Agendamento não encontrado")
+    if user and post.owner_user_id and post.owner_user_id != str(user.id) and post.owner_user_id != "default":
+        raise HTTPException(status_code=403, detail="Acesso não autorizado a este post.")
+
+    try:
+        dt_utc = _parse_scheduled_dt(req.scheduled_time)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Data/hora inválida. Formato correto: YYYY-MM-DDTHH:MM:SS ou ISO UTC.")
+
+    post.scheduled_time = dt_utc
+    if post.status == "failed":
+        post.status = "pending"
+        post.error_message = None
+    db.commit()
+    return {"status": "success", "post_id": post.id, "scheduled_time": post.scheduled_time.isoformat()}
 
 
 @router.delete("/api/posts/{post_id}")
@@ -243,8 +327,14 @@ def get_repost_eligible(db: Session = Depends(get_db)):
 # ── Analytics ──
 
 @router.get("/api/analytics/overview")
-def analytics_overview(period: int = 30, account_username: Optional[str] = None, db: Session = Depends(get_db)):
-    return analytics.get_analytics_overview(db, period, account_username)
+def analytics_overview(
+    period: int = 30,
+    account_username: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    return analytics.get_analytics_overview(db, period, account_username, start_date, end_date)
 
 @router.get("/api/analytics/followers")
 def analytics_followers(period: int = 90, account_username: Optional[str] = None, db: Session = Depends(get_db)):

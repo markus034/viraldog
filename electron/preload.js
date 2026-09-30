@@ -31,8 +31,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   removeDownloadStatus: () => ipcRenderer.removeAllListeners('download-status'),
 
-  // Seleção de diretório nativo
+  // Seleção de diretório e arquivos nativos
   selectDirectory: () => ipcRenderer.invoke('select-directory'),
+  selectFiles: (options) => ipcRenderer.invoke('select-files', options),
 
   // Controle do navegador IG integrado
   showIgBrowser: (bounds, partitionName, proxyUrl) => ipcRenderer.send('show-ig-browser', bounds, partitionName, proxyUrl),
@@ -49,6 +50,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('ig-favorites-menu-closed', () => callback())
   },
   removeIgFavoritesMenuClosed: () => ipcRenderer.removeAllListeners('ig-favorites-menu-closed'),
+  getBrowserFavorites: () => ipcRenderer.invoke('get-browser-favorites'),
+  addBrowserFavorite: (payload) => ipcRenderer.invoke('add-browser-favorite', payload),
+  removeBrowserFavorite: (payload) => ipcRenderer.invoke('remove-browser-favorite', payload),
+  toggleFavoritesPopover: (payload) => ipcRenderer.send('toggle-favorites-popover', payload),
+  closeFavoritesPopover: () => ipcRenderer.send('close-favorites-popover'),
+  onBrowserFavoritesUpdated: (callback) => {
+    ipcRenderer.removeAllListeners('browser-favorites-updated')
+    ipcRenderer.on('browser-favorites-updated', (event, data) => callback(data))
+  },
+  removeBrowserFavoritesUpdated: () => ipcRenderer.removeAllListeners('browser-favorites-updated'),
   triggerDownload: (url, filename) => ipcRenderer.send('ig-browser-download-url', url, filename),
   onIgBrowserNavigated: (callback) => {
     ipcRenderer.removeAllListeners('ig-browser-navigated')
@@ -56,11 +67,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   removeIgBrowserNavigated: () => ipcRenderer.removeAllListeners('ig-browser-navigated'),
   setDownloadFolder: (folder) => ipcRenderer.send('set-download-folder', folder),
+  clearDownloaderSession: () => ipcRenderer.invoke('clear-downloader-session'),
+  getDownloaderSessions: () => ipcRenderer.invoke('get-downloader-sessions'),
+  clearDownloaderSessionTarget: (target) => ipcRenderer.invoke('clear-downloader-session-target', target),
+  importCookies: (cookiesText, partitionName) => ipcRenderer.invoke('import-cookies', cookiesText, partitionName),
 
   // Google bloqueia autenticação em WebContentsView. Abre um Chrome real,
   // mantendo um perfil externo isolado para cada conta do MultiLogin.
-  openExternalProfileBrowser: (profileKey, proxyUrl, url, sessionCookies) =>
-    ipcRenderer.invoke('open-external-profile-browser', profileKey, proxyUrl, url, sessionCookies),
+  openExternalProfileBrowser: (profileKey, proxyUrl, url, sessionCookies, fingerprint, extensionsConfig) =>
+    ipcRenderer.invoke('open-external-profile-browser', profileKey, proxyUrl, url, sessionCookies, fingerprint, extensionsConfig),
+  openMultipleProfileBrowsers: (accounts, layout, syncUrl) =>
+    ipcRenderer.invoke('open-multiple-profile-browsers', accounts, layout, syncUrl),
+  closeAllProfileBrowsers: () =>
+    ipcRenderer.invoke('close-all-profile-browsers'),
   onExternalBrowserStatus: (callback) => {
     ipcRenderer.removeAllListeners('external-browser-status')
     ipcRenderer.on('external-browser-status', (event, value) => callback(value))
@@ -91,4 +110,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('meta-oauth-complete', listener)
   },
   removeMetaOAuthComplete: () => ipcRenderer.removeAllListeners('meta-oauth-complete'),
+
+  // Ouvinte global para pausar todas as mídias (ao minimizar, perder foco ou sair)
+  onPauseAllMedia: (callback) => {
+    const listener = () => callback()
+    ipcRenderer.on('pause-all-media', listener)
+    return () => ipcRenderer.removeListener('pause-all-media', listener)
+  },
+  removePauseAllMedia: () => ipcRenderer.removeAllListeners('pause-all-media'),
 })

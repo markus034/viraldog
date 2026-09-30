@@ -113,15 +113,8 @@ def run_scheduler():
                 except Exception as e:
                     print(f"Scheduler: Follower snapshot error: {e}")
 
-            # ── Job 4: Auto-repost ──
-            if _should_run(db, "repost_check"):
-                try:
-                    for post_data in publisher.check_repost_eligible(db)[:3]:
-                        publisher.create_repost(db, post_data["id"])
-                        print(f"Scheduler: Repost created for post #{post_data['id']}")
-                    _mark_run(db, "repost_check")
-                except Exception as e:
-                    print(f"Scheduler: Repost error: {e}")
+            # ── Job 4: Auto-repost (Desativado: agendamentos somente sob ação manual do usuário) ──
+            # Postagens só são criadas quando o usuário explicitamente agenda pelo Wizard ou Agendamento em Massa.
 
             # ── Job 5: Token refresh check ──
             if _should_run(db, "token_refresh_check"):

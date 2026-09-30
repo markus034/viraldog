@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, Fragment } from 'react';
 import CustomSelect from './CustomSelect';
 import { API, apiFetch } from '../config';
 
@@ -44,6 +44,29 @@ function parseProxyInput(raw) {
   // Devolve como está (fallback)
   return s;
 }
+
+export const USER_AGENT_PRESETS = [
+  { label: 'Chrome 124 (Windows 11)', value: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' },
+  { label: 'Chrome 123 (macOS Sonoma)', value: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36' },
+  { label: 'Safari 17.4 (macOS Sonoma)', value: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15' },
+  { label: 'Edge 124 (Windows 11)', value: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0' },
+  { label: 'Chrome Mobile (Android 14)', value: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36' },
+];
+
+export const RESOLUTION_PRESETS = [
+  { label: '1920 × 1080 (FHD)', width: 1920, height: 1080 },
+  { label: '1440 × 900 (MacBook)', width: 1440, height: 900 },
+  { label: '1366 × 768 (HD)', width: 1366, height: 768 },
+  { label: '1280 × 800 (Compact)', width: 1280, height: 800 },
+];
+
+
+export const STATUS_OPTIONS = [
+  { id: 'active', label: 'Ativo', color: '#059669', bg: '#ECFDF5', border: '#A7F3D0', dot: 'bg-emerald-500', icon: 'check_circle' },
+  { id: 'new', label: 'Novo', color: '#0071E3', bg: '#EFF6FF', border: '#BFDBFE', dot: 'bg-blue-500', icon: 'fiber_new' },
+  { id: 'paused', label: 'Pausado', color: '#D97706', bg: '#FFFBEB', border: '#FDE68A', dot: 'bg-amber-500', icon: 'pause_circle' },
+  { id: 'banned', label: 'Banido', color: '#DC2626', bg: '#FEF2F2', border: '#FECACA', dot: 'bg-rose-500', icon: 'block' },
+];
 
 function getExternalProfileKey(username, accountId) {
   const normalizedUsername = String(username || 'global').replace('@', '').trim().toLowerCase();
@@ -109,6 +132,17 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
   const [editProxyTestResult, setEditProxyTestResult] = useState(null);
   const [savingEdit, setSavingEdit] = useState(false);
 
+  // Fingerprint & Anti-Detect States
+  const [editUserAgent, setEditUserAgent] = useState('');
+  const [editWindowWidth, setEditWindowWidth] = useState(1920);
+  const [editWindowHeight, setEditWindowHeight] = useState(1080);
+  const [editLang, setEditLang] = useState('pt-BR');
+  const [editCanvasNoise, setEditCanvasNoise] = useState(true);
+  const [editWebglNoise, setEditWebglNoise] = useState(true);
+  const [editAudioNoise, setEditAudioNoise] = useState(true);
+  const [editTimezone, setEditTimezone] = useState('America/Sao_Paulo');
+
+
   // Sessão de autenticação acompanhada no Chrome externo
   const [authBrowserSession, setAuthBrowserSession] = useState(null);
 
@@ -118,6 +152,145 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
   const [nicknameInput, setNicknameInput] = useState('');
   const [isSavingNickname, setIsSavingNickname] = useState(false);
   const nicknameInputRef = useRef(null);
+
+  // 🧩 Gerenciador de Extensões
+  const [isExtensionsModalOpen, setIsExtensionsModalOpen] = useState(false);
+  const [extensionsList, setExtensionsList] = useState([]);
+  const [loadingExtensions, setLoadingExtensions] = useState(false);
+  const [uploadingExtZip, setUploadingExtZip] = useState(false);
+  const [editExtensionsConfig, setEditExtensionsConfig] = useState({});
+
+  // 🚀 Multi-Launch / Grade Inteligente de Navegadores
+  const [isMultiLaunchModalOpen, setIsMultiLaunchModalOpen] = useState(false);
+  const [multiLaunchLayout, setMultiLaunchLayout] = useState('grid'); // 'grid' | 'cascade' | 'default'
+  const [multiLaunchSyncUrl, setMultiLaunchSyncUrl] = useState('https://www.instagram.com/');
+  const [isLaunchingMultiple, setIsLaunchingMultiple] = useState(false);
+
+  // Buscar catálogo de extensões do backend
+  const fetchExtensions = async () => {
+    setLoadingExtensions(true);
+    try {
+      const res = await fetch(`${API}/api/extensions`);
+      if (res.ok) {
+        const data = await res.json();
+        setExtensionsList(Array.isArray(data) ? data : []);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoadingExtensions(false);
+    }
+  };
+
+  // Alternar ativação global de extensão
+  const handleToggleGlobalExtension = async (extId, currentEnabled) => {
+    const nextState = !currentEnabled;
+    try {
+      const res = await fetch(`${API}/api/extensions/toggle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ extension_id: extId, enabled: nextState })
+      });
+      if (res.ok) {
+        setExtensionsList(prev => prev.map(ext => ext.id === extId ? { ...ext, enabled: nextState } : ext));
+        triggerToast(`Extensão ${nextState ? 'ativada' : 'desativada'} globalmente!`, 'success');
+      } else {
+        triggerToast('Erro ao atualizar status da extensão.', 'error');
+      }
+    } catch {
+      triggerToast('Erro de conexão ao alternar extensão.', 'error');
+    }
+  };
+
+  // Upload de extensão compactada (.zip)
+  const handleUploadExtensionZip = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.zip')) {
+      triggerToast('Por favor, selecione um arquivo compactado .ZIP válido.', 'error');
+      return;
+    }
+
+    setUploadingExtZip(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch(`${API}/api/extensions/upload`, {
+        method: 'POST',
+        body: formData
+      });
+      const data = await res.json();
+      if (res.ok) {
+        triggerToast(`✅ Extensão "${data.name || file.name}" instalada com sucesso!`, 'success');
+        fetchExtensions();
+      } else {
+        triggerToast(data.detail || 'Falha ao instalar extensão.', 'error');
+      }
+    } catch {
+      triggerToast('Erro de conexão ao enviar arquivo de extensão.', 'error');
+    } finally {
+      setUploadingExtZip(false);
+      e.target.value = '';
+    }
+  };
+
+  // Executar abertura simultânea direta com Grade Inteligente (Lado a lado, Instagram)
+  const handleExecuteMultiLaunch = async () => {
+    if (!isElectron || !window.electronAPI?.openMultipleProfileBrowsers) {
+      triggerToast('A abertura simultânea requer o aplicativo desktop.', 'info');
+      return;
+    }
+
+    const selectedAccounts = safeAccountsList.filter(a => selectedAccountIds.includes(a.id));
+    if (selectedAccounts.length === 0) return;
+
+    setIsLaunchingMultiple(true);
+    triggerToast(`🚀 Abrindo ${selectedAccounts.length} perfis lado a lado em Grade Inteligente...`, 'info');
+
+    try {
+      const formattedAccounts = selectedAccounts.map(acc => ({
+        profile_key: getExternalProfileKey(acc.username, acc.id),
+        proxy: acc.proxy_url || null,
+        last_url: 'https://www.instagram.com/',
+        session_cookies: acc.session_cookies || null,
+        fingerprint_json: acc.fingerprint_json || null,
+        extensions_config_json: acc.extensions_config_json || null,
+      }));
+
+      const res = await window.electronAPI.openMultipleProfileBrowsers(
+        formattedAccounts,
+        'grid',
+        'https://www.instagram.com/'
+      );
+
+      if (res?.success) {
+        triggerToast(`✅ ${res.openedCount} de ${res.total} perfis iniciados em grade com sucesso!`, 'success');
+      } else {
+        triggerToast(res?.error || 'Erro ao abrir perfis em lote.', 'error');
+      }
+    } catch (e) {
+      triggerToast('Erro ao despachar abertura simultânea.', 'error');
+    } finally {
+      setIsLaunchingMultiple(false);
+    }
+  };
+
+  // Fechar todos os navegadores externos abertos
+  const handleCloseAllBrowsers = async () => {
+    if (!isElectron || !window.electronAPI?.closeAllProfileBrowsers) {
+      triggerToast('O controle de processos requer o aplicativo desktop.', 'info');
+      return;
+    }
+
+    try {
+      const res = await window.electronAPI.closeAllProfileBrowsers();
+      if (res?.success) {
+        triggerToast(`⛔ ${res.count || 'Todos os'} navegadores externos foram encerrados com sucesso.`, 'info');
+      }
+    } catch {
+      triggerToast('Erro ao encerrar navegadores.', 'error');
+    }
+  };
 
 
 
@@ -157,65 +330,6 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
     };
   }, [isElectron, triggerToast]);
 
-  // Listener para capturar o callback do popup oficial da Meta
-  useEffect(() => {
-    const handleMessage = async (event) => {
-      if (!event.data) return;
-      if (event.data.type === 'META_OAUTH_SUCCESS') {
-        const accs = event.data.accounts || [];
-        const names = accs.map(a => `@${a.username}`).join(', ');
-        triggerToast(`✅ Conta(s) Oficial Meta vinculada(s) com sucesso: ${names}!`, 'success');
-        await fetchAccounts(true);
-      } else if (event.data.type === 'META_OAUTH_ERROR' || event.data.type === 'IG_OAUTH_ERROR') {
-        triggerToast(`❌ Erro na autorização da Meta: ${event.data.error || 'Operação cancelada'}`, 'error');
-      }
-    };
-    window.addEventListener('message', handleMessage);
-    return () => window.removeEventListener('message', handleMessage);
-  }, [triggerToast]);
-
-  // Listener para capturar o Deep Link nativo (viraldog://auth/callback)
-  useEffect(() => {
-    if (!isElectron || !window.electronAPI?.onMetaOAuthComplete) return;
-
-    const cleanup = window.electronAPI.onMetaOAuthComplete(async (data) => {
-      console.log('[MultiLogin] Deep Link da Meta recebido:', data);
-      triggerToast('✅ Conta oficial da Meta vinculada com sucesso pelo aplicativo!', 'success');
-      await fetchAccounts(true);
-    });
-
-    return () => {
-      if (typeof cleanup === 'function') cleanup();
-      else window.electronAPI.removeMetaOAuthComplete?.();
-    };
-  }, [isElectron, triggerToast]);
-
-  const handleStartMetaOAuthLogin = async () => {
-    try {
-      const res = await apiFetch('/api/auth/meta/url');
-      const data = await res.json();
-      if (res.ok && data.auth_url) {
-        const width = 640;
-        const height = 760;
-        const left = (window.innerWidth - width) / 2 + window.screenX;
-        const top = (window.innerHeight - height) / 2 + window.screenY;
-        const popup = window.open(
-          data.auth_url,
-          'MetaOAuth',
-          `width=${width},height=${height},top=${top},left=${left},status=no,toolbar=no,menubar=no`
-        );
-        if (!popup) {
-          window.open(data.auth_url, '_blank');
-        }
-        triggerToast('Janela oficial de Login da Meta aberta.', 'info');
-      } else {
-        triggerToast(data.detail || 'Erro ao gerar link de login da Meta.', 'error');
-      }
-    } catch (e) {
-      console.error(e);
-      triggerToast('Erro de conexão ao iniciar login com a Meta.', 'error');
-    }
-  };
 
   const handleStartNewProfileInstagramLogin = async () => {
     if (!isElectron || !window.electronAPI?.startExternalInstagramLogin) {
@@ -322,8 +436,8 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
       const res = await fetch(`${API}/api/accounts`);
       if (res.ok) {
         const data = await res.json();
-        setAccounts(data);
-        window.dispatchEvent(new CustomEvent('viraldog:accounts-updated', { detail: { accounts: data } }));
+        const localProfiles = Array.isArray(data) ? data.filter(a => a.auth_mode !== 'official_api') : [];
+        setAccounts(localProfiles);
       } else if (!silent) {
         triggerToast("Falha ao obter perfis.", "error");
       }
@@ -338,7 +452,14 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
   useEffect(() => {
     fetchAccounts();
 
-    const handleSync = () => fetchAccounts(true);
+    let lastSync = 0;
+    const handleSync = () => {
+      const now = Date.now();
+      if (now - lastSync < 3000) return;
+      lastSync = now;
+      fetchAccounts(true);
+    };
+
     window.addEventListener('viraldog:accounts-updated', handleSync);
     window.addEventListener('focus', handleSync);
 
@@ -387,11 +508,24 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
 
   // Escutar encerramento e sucesso do OAuth do Instagram para salvar e fechar automaticamente
   useEffect(() => {
-    const handleOAuthMessage = (event) => {
-      if (event.data && event.data.type === 'INSTAGRAM_OAUTH_SUCCESS') {
-        triggerToast(`Conta @${event.data.username || ''} conectada e salva com sucesso!`, 'success');
+    const handleOAuthMessage = async (event) => {
+      if (!event.data) return;
+      if (event.data.type === 'INSTAGRAM_OAUTH_SUCCESS' || event.data.type === 'META_OAUTH_SUCCESS') {
+        const username = event.data.username || (event.data.accounts && event.data.accounts[0]?.username) || '';
+        triggerToast(`Conta @${username} conectada e salva com sucesso via API Oficial!`, 'success');
         fetchAccounts();
         closeCreateProfile();
+      } else if (event.data.type === 'META_OAUTH_CODE' && event.data.code) {
+        try {
+          const res = await fetch(`${API}/auth/callback?code=${encodeURIComponent(event.data.code)}&state=${encodeURIComponent(event.data.state || '')}`);
+          if (res.ok) {
+            triggerToast('Conta conectada com sucesso via API Oficial!', 'success');
+            fetchAccounts();
+            closeCreateProfile();
+          }
+        } catch (e) {
+          console.error(e);
+        }
       }
     };
     window.addEventListener('message', handleOAuthMessage);
@@ -471,29 +605,14 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
         body: JSON.stringify({
           username: name,
           proxy_url: parsedProxy,
-          folder: newFolder.trim() || 'Geral'
+          folder: newFolder.trim() || 'Geral',
+          notes: newNotes.trim() || null,
+          tags: newTags.trim() || null
         })
       });
 
       if (res.ok) {
-        let createdAccount = null;
-        const accountsRes = await fetch(`${API}/api/accounts`);
-        if (accountsRes.ok) {
-          const fetched = await accountsRes.json();
-          createdAccount = fetched.find(acc => acc.username === name);
-          if (createdAccount) {
-            await fetch(`${API}/api/accounts/${createdAccount.id}`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                notes: newNotes.trim() || null,
-                tags: newTags.trim() || null,
-                folder: newFolder.trim() || 'Geral',
-                status: 'new',
-              })
-            });
-          }
-        }
+        const createdAccount = await res.json();
         triggerToast(`Perfil @${name} cadastrado com sucesso!`, "success");
         setNewUsername('');
         setNewFolder('Geral');
@@ -539,7 +658,8 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
     }
   };
 
-  // Editar Perfil
+
+  // Abrir Modal Limpo de Edição de Perfil
   const openEditModal = (account) => {
     setEditingAccount(account);
     setEditProxy(account.proxy_url || '');
@@ -598,7 +718,9 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
         getExternalProfileKey(account.username, account.id),
         account.proxy_url || null,
         'https://www.instagram.com/',
-        account.session_cookies || null
+        account.session_cookies || null,
+        account.fingerprint_json || null,
+        account.extensions_config_json || null
       );
       if (result?.success) {
         const proxyMessage = result.requiresProxyAuthentication
@@ -616,7 +738,7 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
   };
 
   const handleSaveEdit = async (e) => {
-    e.preventDefault();
+    if (e) e.preventDefault();
     if (!editingAccount) return;
 
     setSavingEdit(true);
@@ -637,6 +759,26 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
 
       const cleanName = editDisplayName.trim().replace(/^@/, '');
 
+      // Garantir Fingerprint aleatório anti-detect automático transparente
+      let fingerprintObj = null;
+      if (editingAccount.fingerprint_json) {
+        try { fingerprintObj = JSON.parse(editingAccount.fingerprint_json); } catch (e) {}
+      }
+      if (!fingerprintObj) {
+        const randomUa = USER_AGENT_PRESETS[Math.floor(Math.random() * USER_AGENT_PRESETS.length)].value;
+        const randomRes = RESOLUTION_PRESETS[Math.floor(Math.random() * RESOLUTION_PRESETS.length)];
+        fingerprintObj = {
+          userAgent: randomUa,
+          windowWidth: randomRes.width,
+          windowHeight: randomRes.height,
+          lang: 'pt-BR',
+          canvasNoise: true,
+          webglNoise: true,
+          audioNoise: true,
+          timezone: 'America/Sao_Paulo'
+        };
+      }
+
       const payload = {
         username: cleanName,
         display_name: cleanName,
@@ -645,6 +787,7 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
         tags: editTags.trim(),
         status: editStatus,
         avatar_url: avatarUrl,
+        fingerprint_json: JSON.stringify(fingerprintObj)
       };
 
       const res = await fetch(`${API}/api/accounts/${editingAccount.id}`, {
@@ -663,6 +806,7 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
           status: editStatus,
           proxy_url: parseProxyInput(editProxy) || '',
           avatar_url: avatarUrl,
+          fingerprint_json: JSON.stringify(fingerprintObj)
         } : a));
         triggerToast(`Perfil @${cleanName} atualizado com sucesso.`, "success");
         setEditingAccount(null);
@@ -819,6 +963,24 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
   const defaultSuggestedTags = ['Instagram', 'Principal', 'Aquecimento', 'Vendas', 'Suporte', 'VIP'];
   const safeAccountsList = Array.isArray(accounts) ? accounts : [];
 
+  const [deletedTags, setDeletedTags] = useState(() => {
+    try {
+      const saved = localStorage.getItem('viraldog_deleted_tags');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [customTags, setCustomTags] = useState(() => {
+    try {
+      const saved = localStorage.getItem('viraldog_custom_tags');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
   const existingAccountTags = safeAccountsList
     .flatMap(acc => (typeof acc.tags === 'string' ? acc.tags : '').split(','))
     .map(t => t.trim())
@@ -835,8 +997,14 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
     .filter(Boolean);
 
   const allAvailableTags = Array.from(
-    new Set([...defaultSuggestedTags, ...existingAccountTags, ...selectedTagsList, ...editSelectedTagsList])
-  );
+    new Set([
+      ...defaultSuggestedTags,
+      ...customTags,
+      ...existingAccountTags,
+      ...selectedTagsList,
+      ...editSelectedTagsList
+    ])
+  ).filter(tag => !deletedTags.includes(tag.toLowerCase()));
 
   const toggleTag = (tagToToggle) => {
     const exists = selectedTagsList.some(t => t.toLowerCase() === tagToToggle.toLowerCase());
@@ -852,7 +1020,24 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
   const handleAddCustomTag = () => {
     const trimmed = customTagInput.trim();
     if (!trimmed) return;
-    const exists = selectedTagsList.some(t => t.toLowerCase() === trimmed.toLowerCase());
+    const tagLower = trimmed.toLowerCase();
+
+    // Reativar se foi excluída anteriormente
+    const nextDeleted = deletedTags.filter(t => t !== tagLower);
+    setDeletedTags(nextDeleted);
+    try {
+      localStorage.setItem('viraldog_deleted_tags', JSON.stringify(nextDeleted));
+    } catch {}
+
+    if (!customTags.some(t => t.toLowerCase() === tagLower)) {
+      const nextCustom = [...customTags, trimmed];
+      setCustomTags(nextCustom);
+      try {
+        localStorage.setItem('viraldog_custom_tags', JSON.stringify(nextCustom));
+      } catch {}
+    }
+
+    const exists = selectedTagsList.some(t => t.toLowerCase() === tagLower);
     if (!exists) {
       setNewTags([...selectedTagsList, trimmed].join(', '));
     }
@@ -873,24 +1058,100 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
   const handleAddEditCustomTag = () => {
     const trimmed = editCustomTagInput.trim();
     if (!trimmed) return;
-    const exists = editSelectedTagsList.some(t => t.toLowerCase() === trimmed.toLowerCase());
+    const tagLower = trimmed.toLowerCase();
+
+    // Reativar se foi excluída anteriormente
+    const nextDeleted = deletedTags.filter(t => t !== tagLower);
+    setDeletedTags(nextDeleted);
+    try {
+      localStorage.setItem('viraldog_deleted_tags', JSON.stringify(nextDeleted));
+    } catch {}
+
+    if (!customTags.some(t => t.toLowerCase() === tagLower)) {
+      const nextCustom = [...customTags, trimmed];
+      setCustomTags(nextCustom);
+      try {
+        localStorage.setItem('viraldog_custom_tags', JSON.stringify(nextCustom));
+      } catch {}
+    }
+
+    const exists = editSelectedTagsList.some(t => t.toLowerCase() === tagLower);
     if (!exists) {
       setEditTags([...editSelectedTagsList, trimmed].join(', '));
     }
     setEditCustomTagInput('');
   };
 
+  const handleDeleteTag = async (tagToDelete, e) => {
+    if (e) {
+      e.stopPropagation();
+      e.preventDefault();
+    }
+    const tagLower = tagToDelete.toLowerCase();
+
+    // 1. Gravar em deletedTags
+    const nextDeleted = Array.from(new Set([...deletedTags, tagLower]));
+    setDeletedTags(nextDeleted);
+    try {
+      localStorage.setItem('viraldog_deleted_tags', JSON.stringify(nextDeleted));
+    } catch (err) {
+      console.error(err);
+    }
+
+    // 2. Remover de customTags
+    const nextCustom = customTags.filter(t => t.toLowerCase() !== tagLower);
+    setCustomTags(nextCustom);
+    try {
+      localStorage.setItem('viraldog_custom_tags', JSON.stringify(nextCustom));
+    } catch (err) {
+      console.error(err);
+    }
+
+    // 3. Desmarcar nos modais
+    const updatedNewTags = selectedTagsList.filter(t => t.toLowerCase() !== tagLower);
+    setNewTags(updatedNewTags.join(', '));
+
+    const updatedEditTags = editSelectedTagsList.filter(t => t.toLowerCase() !== tagLower);
+    setEditTags(updatedEditTags.join(', '));
+
+    // 4. Remover globalmente de todas as contas cadastradas
+    const accountsWithTag = safeAccountsList.filter(acc => {
+      const accTags = (typeof acc.tags === 'string' ? acc.tags : '').split(',').map(t => t.trim()).filter(Boolean);
+      return accTags.some(t => t.toLowerCase() === tagLower);
+    });
+
+    if (accountsWithTag.length > 0) {
+      setAccounts(prev => (Array.isArray(prev) ? prev : []).map(acc => {
+        const accTags = (typeof acc.tags === 'string' ? acc.tags : '').split(',').map(t => t.trim()).filter(Boolean);
+        const filtered = accTags.filter(t => t.toLowerCase() !== tagLower);
+        return { ...acc, tags: filtered.join(', ') };
+      }));
+
+      for (const acc of accountsWithTag) {
+        const accTags = (typeof acc.tags === 'string' ? acc.tags : '').split(',').map(t => t.trim()).filter(Boolean);
+        const filtered = accTags.filter(t => t.toLowerCase() !== tagLower);
+        fetch(`${API}/api/accounts/${acc.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tags: filtered.join(', ') })
+        }).catch(err => console.error(err));
+      }
+    }
+
+    triggerToast(`Tag "${tagToDelete}" excluída com sucesso.`, 'success');
+  };
+
   const tagOptions = [
     { value: '', label: 'Todas as Tags', icon: 'sell' },
-    ...allAvailableTags.map(tag => ({ value: tag, label: tag, icon: 'label' }))
+    ...allAvailableTags.map(tag => ({ value: tag, label: tag, isTag: true }))
   ];
 
   const statusOptions = [
     { value: '', label: 'Todos os Status', icon: 'checklist' },
-    { value: 'new', label: 'Novo', icon: 'fiber_new' },
-    { value: 'active', label: 'Ativo', icon: 'check_circle' },
-    { value: 'paused', label: 'Pausado', icon: 'pause_circle' },
-    { value: 'banned', label: 'Banido', icon: 'block' },
+    { value: 'new', label: 'Novo', dotColor: '#0071E3' },
+    { value: 'active', label: 'Ativo', dotColor: '#30D158' },
+    { value: 'paused', label: 'Pausado', dotColor: '#FF9500' },
+    { value: 'banned', label: 'Banido', dotColor: '#FF3B30' },
   ];
 
   const handleQuickStatusChange = async (account, newStatus) => {
@@ -924,21 +1185,37 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
         account.tags,
         account.folder,
         account.status,
-      ].some(value => String(value || '').toLowerCase().includes(normalizedSearch));
+        ...(Array.isArray(account.tags) ? account.tags : []),
+      ].some(val => val && String(val).toLowerCase().includes(normalizedSearch));
+
       if (!matchesSearch) return false;
     }
 
     if (selectedTag) {
-      const accTags = (typeof account.tags === 'string' ? account.tags : '').split(',').map(t => t.trim().toLowerCase());
-      if (!accTags.includes(selectedTag.toLowerCase())) return false;
+      const accTags = Array.isArray(account.tags)
+        ? account.tags
+        : (typeof account.tags === 'string' ? account.tags.split(',').map(t => t.trim()) : []);
+      if (!accTags.includes(selectedTag)) return false;
     }
 
     if (selectedStatus) {
-      if (String(account.status || 'new').toLowerCase() !== selectedStatus.toLowerCase()) return false;
+      const statusVal = account.status || 'new';
+      if (statusVal !== selectedStatus) return false;
     }
 
     return true;
   });
+
+  const handleCreateSuccess = () => {
+    fetchAccounts();
+    fetchTags();
+    if (authBrowserSession) {
+      authBrowserSession.close();
+      setAuthBrowserSession(null);
+    }
+    setNewProxyTestResult(null);
+    setIsCreateModalOpen(false);
+  };
 
   const closeCreateProfile = () => {
     if (authBrowserSession && authBrowserSession.isNewProfile) {
@@ -959,123 +1236,128 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
   return (
     <div className="w-full min-h-[calc(100vh-64px)] flex flex-col fade-in pb-16">
       
-      {/* ─── Header Minimalista High-End (/DESIGN) ─── */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6 flex-shrink-0">
-        <div>
-          <div className="flex items-center gap-3">
-            <h1 className="text-[26px] leading-tight font-bold tracking-[-0.02em] text-[#1D1D1F]">Perfis</h1>
-            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-[#F5F5F7] text-[#1D1D1F] border border-[#E8E8EA]">
-              {totalCount} {totalCount === 1 ? 'perfil' : 'perfis'}
+      {/* ─── Toolbar Principal: Busca + Filtros + Status Badge + Extensões + Criar Perfil (/DESIGN) ─── */}
+      <div className="bg-white border border-[#E8E8EA] rounded-2xl p-3 flex flex-wrap items-center justify-between gap-3 shadow-2xs mb-5">
+        
+        {/* Esquerda: Busca + Filtro Tag + Filtro Status + Limpar */}
+        <div className="flex flex-wrap items-center gap-2.5 flex-1 min-w-[300px]">
+          {/* Campo de Busca */}
+          <div className="relative flex-1 min-w-[200px] max-w-[360px] flex items-center">
+            <span className="material-symbols-outlined absolute left-3.5 top-0 bottom-0 flex items-center justify-center text-[18px] text-[#86868B] pointer-events-none select-none">
+              search
             </span>
-          </div>
-          <p className="mt-1 text-[13px] font-normal text-[#86868B]">
-            Gerencie e inicie seus ambientes isolados de navegação com alto desempenho.
-          </p>
-        </div>
-
-        <div className="flex items-center gap-3">
-          {/* Quick Counter Badges */}
-          <div className="hidden lg:flex items-center gap-2 px-3 py-1.5 rounded-full bg-white border border-[#E8E8EA] shadow-xs text-[11px] font-medium">
-            <span className="text-[#059669] font-semibold">● {activeCount} Ativo{activeCount !== 1 && 's'}</span>
-            <span className="text-[#86868B]">|</span>
-            <span className="text-[#0071E3] font-semibold">{newCount} Novo{newCount !== 1 && 's'}</span>
-            {pausedCount > 0 && (
-              <>
-                <span className="text-[#86868B]">|</span>
-                <span className="text-[#D97706] font-semibold">{pausedCount} Pausado{pausedCount !== 1 && 's'}</span>
-              </>
-            )}
-            {bannedCount > 0 && (
-              <>
-                <span className="text-[#86868B]">|</span>
-                <span className="text-[#DC2626] font-semibold">{bannedCount} Banido{bannedCount !== 1 && 's'}</span>
-              </>
+            <input
+              id="profile-search-input"
+              type="text"
+              inputMode="search"
+              value={profileSearch}
+              onChange={e => setProfileSearch(e.target.value)}
+              placeholder="Buscar por nome, tag ou notas..."
+              className="w-full h-10 rounded-xl bg-[#F5F5F7] pl-10 pr-9 text-xs font-medium text-[#1D1D1F] placeholder:text-[#86868B] border border-transparent focus:outline-none focus:bg-white focus:border-[#0071E3] focus:ring-4 focus:ring-[#0071E3]/15 transition-all"
+            />
+            {profileSearch && (
+              <button
+                type="button"
+                onClick={() => setProfileSearch('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-[#86868B] hover:text-[#1D1D1F] p-0.5 rounded-full hover:bg-black/5 transition-colors flex items-center justify-center"
+                title="Limpar busca"
+              >
+                <span className="material-symbols-outlined text-[16px] leading-none block">close</span>
+              </button>
             )}
           </div>
 
-          <button
-            type="button"
-            className="bg-gradient-to-r from-[#0084FF] to-[#00C6FF] hover:opacity-95 text-white h-10 px-4 rounded-full text-xs font-semibold flex items-center justify-center gap-1.5 transition-all shadow-[0_4px_14px_rgba(0,132,255,0.25)] hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
-            onClick={handleStartMetaOAuthLogin}
-            title="Conectar contas do Instagram via API Oficial da Meta"
-          >
-            <span className="material-symbols-outlined text-[18px]">verified</span>
-            Conectar com a Meta
-          </button>
+          {/* Filtro por Tag */}
+          <div className="w-48">
+            <CustomSelect
+              value={selectedTag}
+              onChange={setSelectedTag}
+              options={tagOptions}
+              placeholder="Todas as Tags"
+              icon="sell"
+              size="md"
+            />
+          </div>
 
-          <button
-            type="button"
-            className="bg-[#0071E3] hover:bg-[#005CBB] text-white h-10 px-5 rounded-full text-xs font-semibold flex items-center justify-center gap-1.5 transition-all shadow-[0_4px_14px_rgba(0,113,227,0.25)] hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
-            onClick={() => setIsCreateModalOpen(true)}
-          >
-            <span className="material-symbols-outlined text-[18px]">add</span>
-            Criar Perfil
-          </button>
-        </div>
-      </div>
+          {/* Filtro por Status */}
+          <div className="w-48">
+            <CustomSelect
+              value={selectedStatus}
+              onChange={setSelectedStatus}
+              options={statusOptions}
+              placeholder="Todos os Status"
+              icon="checklist"
+              size="md"
+            />
+          </div>
 
-      {/* ─── Toolbar: Busca + Filtros + Atalho ─── */}
-      <div className="bg-white border border-[#E8E8EA] rounded-2xl p-3 flex flex-wrap items-center gap-3 card-elevation mb-5">
-        <div className="relative flex-1 min-w-[220px] max-w-[420px] flex items-center">
-          <span className="material-symbols-outlined absolute left-3.5 top-1/2 -translate-y-1/2 text-[18px] text-[#86868B] pointer-events-none select-none flex items-center justify-center leading-none">
-            search
-          </span>
-          <input
-            id="profile-search-input"
-            type="text"
-            inputMode="search"
-            value={profileSearch}
-            onChange={e => setProfileSearch(e.target.value)}
-            placeholder="Buscar por nome, tag ou notas..."
-            className="w-full h-10 rounded-xl bg-[#F5F5F7] pl-10 pr-9 text-xs font-medium text-[#1D1D1F] placeholder:text-[#86868B] border border-transparent focus:outline-none focus:bg-white focus:border-[#0071E3] focus:ring-4 focus:ring-[#0071E3]/15 transition-all"
-          />
-          {profileSearch && (
+          {(selectedTag || selectedStatus || profileSearch) && (
             <button
               type="button"
-              onClick={() => setProfileSearch('')}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-[#86868B] hover:text-[#1D1D1F] p-0.5 rounded-full hover:bg-black/5 transition-colors flex items-center justify-center"
-              title="Limpar busca"
+              onClick={() => { setSelectedTag(''); setSelectedStatus(''); setProfileSearch(''); }}
+              className="h-10 px-3 rounded-xl border border-[#E8E8EA] text-xs font-semibold text-[#86868B] hover:text-[#1D1D1F] hover:bg-[#F5F5F7] flex items-center gap-1.5 transition-colors cursor-pointer"
+              title="Limpar todos os filtros"
             >
-              <span className="material-symbols-outlined text-[16px] leading-none block">close</span>
+              <span className="material-symbols-outlined text-[16px]">filter_alt_off</span>
+              <span>Limpar</span>
             </button>
           )}
         </div>
 
-        {/* Filtro por Tag */}
-        <div className="w-52">
-          <CustomSelect
-            value={selectedTag}
-            onChange={setSelectedTag}
-            options={tagOptions}
-            placeholder="Todas as Tags"
-            icon="sell"
-            size="md"
-          />
-        </div>
+        {/* Direita: Badges de Status + Botão Extensões + Botão Criar Perfil */}
+        <div className="flex items-center gap-2.5">
+          {/* Quick Counter Badges */}
+          {totalCount > 0 && (
+            <div className="hidden lg:flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#F5F5F7] border border-[#E8E8EA] text-[11px] font-medium select-none shadow-2xs">
+              {[
+                { key: 'total', count: totalCount, label: `${totalCount} Total`, color: 'text-[#1D1D1F]', dot: 'bg-[#1D1D1F]' },
+                { key: 'active', count: activeCount, label: `${activeCount} Ativo${activeCount !== 1 ? 's' : ''}`, color: 'text-[#059669]', dot: 'bg-[#059669]' },
+                { key: 'new', count: newCount, label: `${newCount} Novo${newCount !== 1 ? 's' : ''}`, color: 'text-[#0071E3]', dot: 'bg-[#0071E3]' },
+                { key: 'paused', count: pausedCount, label: `${pausedCount} Pausado${pausedCount !== 1 ? 's' : ''}`, color: 'text-[#D97706]', dot: 'bg-[#D97706]' },
+                { key: 'banned', count: bannedCount, label: `${bannedCount} Banido${bannedCount !== 1 ? 's' : ''}`, color: 'text-[#DC2626]', dot: 'bg-[#DC2626]' },
+              ]
+                .filter(item => item.count > 0)
+                .map((item, idx, arr) => (
+                  <Fragment key={item.key}>
+                    <span className={`${item.color} font-bold flex items-center gap-1.5`}>
+                      <span className={`w-2 h-2 rounded-full ${item.dot} inline-block`}></span>
+                      {item.label}
+                    </span>
+                    {idx < arr.length - 1 && (
+                      <span className="text-[#D1D1D6] font-normal">|</span>
+                    )}
+                  </Fragment>
+                ))}
+            </div>
+          )}
 
-        {/* Filtro por Status */}
-        <div className="w-48">
-          <CustomSelect
-            value={selectedStatus}
-            onChange={setSelectedStatus}
-            options={statusOptions}
-            placeholder="Todos os Status"
-            icon="checklist"
-            size="md"
-          />
-        </div>
-
-        {(selectedTag || selectedStatus || profileSearch) && (
+          {/* Botão Extensões */}
           <button
             type="button"
-            onClick={() => { setSelectedTag(''); setSelectedStatus(''); setProfileSearch(''); }}
-            className="h-10 px-3.5 rounded-xl border border-[#E8E8EA] text-xs font-semibold text-[#86868B] hover:text-[#1D1D1F] hover:bg-[#F5F5F7] flex items-center gap-1.5 transition-colors cursor-pointer"
-            title="Limpar todos os filtros"
+            onClick={() => { setIsExtensionsModalOpen(true); fetchExtensions(); }}
+            className="h-10 px-3.5 rounded-xl bg-white hover:bg-[#F5F5F7] border border-[#E8E8EA] text-[#1D1D1F] text-xs font-semibold flex items-center justify-center gap-1.5 transition-all shadow-2xs hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
+            title="Gerenciar extensões do Chrome (Cookie-Editor, Dog Saver, Canvas Defender, etc.)"
           >
-            <span className="material-symbols-outlined text-[16px]">filter_alt_off</span>
-            Limpar Filtros
+            <span className="material-symbols-outlined text-[18px] text-[#0071E3]">extension</span>
+            <span>Extensões</span>
           </button>
-        )}
+
+          {/* Botão Criar Perfil */}
+          <button
+            type="button"
+            className="group relative h-10 px-5 rounded-xl bg-[#0071E3] hover:bg-[#005CBB] text-white text-xs font-bold tracking-wide flex items-center justify-center gap-2 shadow-[0_4px_16px_rgba(0,113,227,0.35)] hover:shadow-[0_6px_22px_rgba(0,113,227,0.48)] transition-all duration-200 active:scale-[0.97] cursor-pointer shrink-0 whitespace-nowrap overflow-hidden"
+            style={{ background: 'linear-gradient(135deg, #0071E3 0%, #0077ED 50%, #0085FF 100%)' }}
+            onClick={() => setIsCreateModalOpen(true)}
+          >
+            <div className="absolute inset-0 bg-white/10 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
+            <span className="material-symbols-outlined text-[19px] font-bold leading-none transition-transform group-hover:rotate-90 duration-300">
+              add
+            </span>
+            <span className="whitespace-nowrap font-bold text-xs tracking-wide">
+              Criar Perfil
+            </span>
+          </button>
+        </div>
       </div>
 
       {/* ─── Tabela Container (Card com Cantos Arredondados) ─── */}
@@ -1144,7 +1426,7 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
                   />
                 </div>
 
-                {/* Perfil (Play + Atualizar Sessão + Avatar + Nome) */}
+                {/* Perfil (Play + Avatar + Nome) */}
                 <div className="flex items-center gap-2.5 min-w-0 pr-3">
                   {/* Play Button */}
                   <button
@@ -1156,7 +1438,7 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
                         ? 'bg-[#0071E3] text-white pulse-active'
                         : 'bg-[#EFF6FF] text-[#0071E3] hover:bg-[#0071E3] hover:text-white hover:scale-105 active:scale-95'
                     }`}
-                    title="Abrir perfil no Chrome isolado"
+                    title="Abrir perfil no Chrome isolado com Fingerprint"
                     aria-label={`Abrir perfil ${acc.username}`}
                   >
                     {isOpening ? (
@@ -1184,19 +1466,8 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
                   </div>
 
                   <div className="min-w-0">
-                    <div className="text-xs font-bold text-[#1D1D1F] truncate flex items-center gap-1.5">
-                      <span className="truncate">{acc.display_name || acc.username}</span>
-                      {acc.revoked ? (
-                        <span className="inline-flex items-center gap-0.5 rounded-full bg-[#FEF2F2] px-1.5 py-0.5 text-[9px] font-bold text-[#DC2626] border border-[#FCA5A5] shrink-0" title="Acesso desautorizado na Meta. Clique em Conectar com a Meta para reativar.">
-                          <span className="material-symbols-outlined text-[10px]">warning</span>
-                          Desautorizado
-                        </span>
-                      ) : (acc.has_official_token || acc.auth_mode === 'official') ? (
-                        <span className="inline-flex items-center gap-0.5 rounded-full bg-[#ECFDF5] px-1.5 py-0.5 text-[9px] font-bold text-[#059669] border border-[#A7F3D0] shrink-0" title={`Conectado via API Oficial da Meta ${acc.token_expires_at ? `(expira em ${new Date(acc.token_expires_at).toLocaleDateString('pt-BR')})` : ''}`}>
-                          <span className="material-symbols-outlined text-[10px]">verified</span>
-                          Meta Oficial
-                        </span>
-                      ) : null}
+                    <div className="text-xs font-bold text-[#1D1D1F] truncate">
+                      {acc.display_name || acc.username}
                     </div>
                     <div className="text-[11px] font-normal text-[#86868B] truncate">
                       @{acc.display_name || acc.username}
@@ -1313,16 +1584,8 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
                           setOpenProfileMenuId(null);
                         }}
                       />
-                      <div className="absolute right-0 top-9 z-40 w-44 rounded-2xl border border-[#E8E8EA] bg-white p-1.5 shadow-[0_14px_40px_rgba(0,0,0,0.12)] animate-modal-scale space-y-0.5">
-                        <button
-                          type="button"
-                          onClick={() => { setOpenProfileMenuId(null); handleDirectSessionCapture(acc); }}
-                          className="w-full flex items-center gap-2.5 rounded-xl px-3 py-2 text-left text-xs font-semibold text-amber-700 hover:bg-amber-50 transition-colors cursor-pointer"
-                        >
-                          <span className="material-symbols-outlined text-[16px] text-amber-600">key</span>
-                          Atualizar sessão
-                        </button>
-                        <div className="my-1 border-t border-[#F0F0F2]" />
+                      <div className="absolute right-0 top-9 z-40 w-48 rounded-2xl border border-[#E8E8EA] bg-white p-1.5 shadow-[0_14px_40px_rgba(0,0,0,0.12)] animate-modal-scale space-y-0.5">
+
                         <button
                           type="button"
                           onClick={() => { setOpenProfileMenuId(null); openEditModal(acc); }}
@@ -1358,84 +1621,114 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
         )}
       </div>
 
-      {/* ─── Bulk Actions Floating Bar (Ações em Lote - Apple Dark Frosted Glass /DESIGN) ─── */}
+      {/* ─── Bulk Actions Floating Bar (Ações em Lote - Apple Clean Dock /DESIGN) ─── */}
       {selectedAccountIds.length > 0 && (
-        <div className="fixed bottom-7 left-1/2 -translate-x-1/2 z-50 bg-[#1D1D1F]/90 backdrop-blur-xl text-white px-4 py-2.5 rounded-full shadow-[0_20px_50px_rgba(0,0,0,0.35)] flex items-center gap-3 animate-slide-up-float border border-white/12 max-w-[92vw] ring-1 ring-black/5">
-          {/* Badge & Contador */}
-          <div className="flex items-center gap-2 pl-1 pr-1.5 py-0.5">
-            <span className="w-5 h-5 rounded-full bg-[#0071E3] text-white flex items-center justify-center text-[11px] font-bold shadow-[0_2px_8px_rgba(0,113,227,0.4)]">
-              {selectedAccountIds.length}
-            </span>
-            <span className="text-xs font-semibold tracking-[-0.01em] text-white/95 whitespace-nowrap">
-              selecionado{selectedAccountIds.length > 1 ? 's' : ''}
-            </span>
-          </div>
+        <div className="fixed bottom-8 inset-x-0 z-50 flex justify-center pointer-events-none px-4">
+          <div className="pointer-events-auto bg-white/95 backdrop-blur-xl text-[#1D1D1F] px-4 py-2.5 rounded-full shadow-[0_20px_60px_rgba(0,0,0,0.14)] flex items-center gap-2.5 animate-slide-up-float border border-[#E8E8EA] max-w-[92vw] ring-1 ring-black/5">
+            {/* Badge & Contador */}
+            <div className="flex items-center gap-2 pl-1 pr-1.5 py-0.5">
+              <span className="w-5 h-5 rounded-full bg-[#0071E3] text-white flex items-center justify-center text-[11px] font-bold shadow-[0_2px_8px_rgba(0,113,227,0.35)]">
+                {selectedAccountIds.length}
+              </span>
+              <span className="text-xs font-bold tracking-tight text-[#1D1D1F] whitespace-nowrap">
+                selecionado{selectedAccountIds.length > 1 ? 's' : ''}
+              </span>
+            </div>
 
-          <div className="h-4 w-px bg-white/15" />
+            <div className="h-4 w-px bg-[#E8E8EA]" />
 
-          {/* Bulk Status Dropdown */}
-          <div className="relative">
+            {/* Bulk Multi-Launch Grid Button (Abertura Direta em Grade Inteligente) */}
             <button
               type="button"
-              onClick={() => setIsBulkStatusOpen(prev => !prev)}
-              className="h-8.5 px-3.5 rounded-full bg-white/10 hover:bg-white/15 active:scale-95 text-xs font-medium text-white flex items-center gap-1.5 transition-all border border-white/10 cursor-pointer"
+              onClick={handleExecuteMultiLaunch}
+              disabled={isLaunchingMultiple || selectedAccountIds.length === 0}
+              className="h-8.5 px-3.5 rounded-full bg-[#0071E3] hover:bg-[#005CBB] active:scale-95 text-white text-xs font-bold flex items-center gap-1.5 transition-all shadow-[0_2px_10px_rgba(0,113,227,0.3)] cursor-pointer disabled:opacity-50"
+              title="Abrir perfis selecionados simultaneamente lado a lado em Grade Inteligente no Instagram"
             >
-              <span>Alterar Status</span>
-              <span className={`material-symbols-outlined text-[16px] text-white/70 transition-transform duration-200 ${isBulkStatusOpen ? 'rotate-180' : ''}`}>
-                expand_more
-              </span>
+              {isLaunchingMultiple ? (
+                <span className="spinner !w-3.5 !h-3.5 !border-white/30 !border-t-white" />
+              ) : (
+                <span className="material-symbols-outlined text-[16px]">grid_view</span>
+              )}
+              <span>Abrir Grade ({selectedAccountIds.length})</span>
             </button>
 
-            {isBulkStatusOpen && (
-              <>
-                <div className="fixed inset-0 z-40" onClick={() => setIsBulkStatusOpen(false)} />
-                <div className="absolute bottom-full mb-2.5 left-0 z-50 min-w-[155px] bg-[#1D1D1F]/95 backdrop-blur-xl border border-white/15 rounded-2xl p-1.5 shadow-[0_16px_40px_rgba(0,0,0,0.4)] space-y-1 animate-modal-scale">
-                  {[
-                    { value: 'new', label: 'Novo', color: '#60A5FA', glow: 'rgba(96,165,250,0.4)' },
-                    { value: 'active', label: 'Ativo', color: '#34D399', glow: 'rgba(52,211,153,0.4)' },
-                    { value: 'paused', label: 'Pausado', color: '#FBBF24', glow: 'rgba(251,191,36,0.4)' },
-                    { value: 'banned', label: 'Banido', color: '#F87171', glow: 'rgba(248,113,113,0.4)' },
-                  ].map(opt => (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      onClick={() => handleBulkStatusChange(opt.value)}
-                      className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium text-white/90 hover:text-white hover:bg-white/10 active:scale-98 transition-all cursor-pointer"
-                    >
-                      <span
-                        className="w-2 h-2 rounded-full"
-                        style={{ backgroundColor: opt.color, boxShadow: `0 0 6px ${opt.glow}` }}
-                      />
-                      <span>{opt.label}</span>
-                    </button>
-                  ))}
-                </div>
-              </>
-            )}
+
+            {/* Bulk Status Dropdown */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setIsBulkStatusOpen(prev => !prev)}
+                className="h-8.5 px-3.5 rounded-full bg-[#F5F5F7] hover:bg-[#E8E8EA] active:scale-95 text-xs font-semibold text-[#1D1D1F] border border-[#E8E8EA] flex items-center gap-1.5 transition-all cursor-pointer"
+              >
+                <span>Alterar Status</span>
+                <span className={`material-symbols-outlined text-[16px] text-[#86868B] transition-transform duration-200 ${isBulkStatusOpen ? 'rotate-180' : ''}`}>
+                  expand_more
+                </span>
+              </button>
+
+              {isBulkStatusOpen && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setIsBulkStatusOpen(false)} />
+                  <div className="absolute bottom-full mb-2.5 left-0 z-50 min-w-[160px] bg-white/95 backdrop-blur-xl border border-[#E8E8EA] rounded-2xl p-1.5 shadow-[0_16px_40px_rgba(0,0,0,0.12)] space-y-0.5 animate-modal-scale">
+                    {[
+                      { value: 'new', label: 'Novo', color: '#0071E3', bg: '#EFF6FF' },
+                      { value: 'active', label: 'Ativo', color: '#16A34A', bg: '#F0FDF4' },
+                      { value: 'paused', label: 'Pausado', color: '#D97706', bg: '#FFFBEB' },
+                      { value: 'banned', label: 'Banido', color: '#DC2626', bg: '#FEF2F2' },
+                    ].map(opt => (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => handleBulkStatusChange(opt.value)}
+                        className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-semibold text-[#1D1D1F] hover:bg-[#F5F5F7] active:scale-98 transition-all cursor-pointer"
+                      >
+                        <span
+                          className="w-2 h-2 rounded-full"
+                          style={{ backgroundColor: opt.color }}
+                        />
+                        <span>{opt.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Botão Fechar Todos os Navegadores */}
+            <button
+              type="button"
+              onClick={handleCloseAllBrowsers}
+              className="h-8.5 px-3 rounded-full bg-[#F5F5F7] hover:bg-[#E8E8EA] active:scale-95 text-xs font-semibold text-[#1D1D1F] border border-[#E8E8EA] flex items-center gap-1.5 transition-all cursor-pointer"
+              title="Encerrar todas as janelas do Chrome externas abertas pelo MultiLogin"
+            >
+              <span className="material-symbols-outlined text-[15px] text-[#86868B]">cancel</span>
+              <span>Fechar Navegadores</span>
+            </button>
+
+            {/* Botão Excluir */}
+            <button
+              type="button"
+              onClick={handleBulkDelete}
+              className="h-8.5 px-3.5 rounded-full bg-rose-50 hover:bg-rose-100 active:scale-95 text-rose-600 border border-rose-200/80 text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[15px] text-rose-500">delete</span>
+              <span>Excluir</span>
+            </button>
+
+            <div className="h-4 w-px bg-[#E8E8EA]" />
+
+            {/* Botão Desmarcar */}
+            <button
+              type="button"
+              onClick={() => setSelectedAccountIds([])}
+              title="Pressione ESC para desmarcar"
+              className="h-8.5 px-2.5 rounded-full hover:bg-[#F5F5F7] active:scale-95 text-xs font-semibold text-[#86868B] hover:text-[#1D1D1F] flex items-center gap-1 transition-all cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[14px] text-[#86868B]">close</span>
+              <span>Desmarcar</span>
+            </button>
           </div>
-
-          {/* Botão Excluir */}
-          <button
-            type="button"
-            onClick={handleBulkDelete}
-            className="h-8.5 px-3.5 rounded-full bg-rose-500/15 hover:bg-rose-500/25 active:scale-95 text-rose-300 hover:text-rose-200 border border-rose-500/25 text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer"
-          >
-            <span className="material-symbols-outlined text-[15px] text-rose-400">delete</span>
-            <span>Excluir</span>
-          </button>
-
-          <div className="h-4 w-px bg-white/15" />
-
-          {/* Botão Desmarcar */}
-          <button
-            type="button"
-            onClick={() => setSelectedAccountIds([])}
-            title="Pressione ESC para desmarcar"
-            className="h-8.5 px-2.5 rounded-full hover:bg-white/10 active:scale-95 text-xs font-medium text-white/60 hover:text-white flex items-center gap-1 transition-all cursor-pointer"
-          >
-            <span className="material-symbols-outlined text-[14px] text-white/40">close</span>
-            <span>Desmarcar</span>
-          </button>
         </div>
       )}
 
@@ -1461,27 +1754,6 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
 
             {/* Modal Body (Scrollable) */}
             <main className="p-6 overflow-y-auto space-y-5 flex-1 custom-scrollbar bg-[#FAFAFC]">
-              
-              {/* Banner API Oficial da Meta */}
-              <div className="p-4 bg-gradient-to-r from-[#0084FF]/10 to-[#00C6FF]/10 border border-[#0084FF]/30 rounded-2xl flex items-center justify-between gap-3 shadow-xs">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-[#0084FF] text-white flex items-center justify-center shrink-0 shadow-sm">
-                    <span className="material-symbols-outlined text-[22px]">verified</span>
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-[#1D1D1F]">Conectar Conta Oficial da Meta</h4>
-                    <p className="text-[11px] text-[#86868B] mt-0.5">Conecte via Facebook OAuth oficial. Sem necessidade de proxy ou senha.</p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => { closeCreateProfile(); handleStartMetaOAuthLogin(); }}
-                  className="px-3.5 py-2 rounded-xl bg-[#0084FF] hover:bg-[#0073E6] text-white text-xs font-bold transition-all shadow-xs shrink-0 cursor-pointer"
-                >
-                  Conectar Meta
-                </button>
-              </div>
-
               <form id="create-profile-form" onSubmit={handleCreateAccount} className="space-y-5">
                 
                 {/* Seção 1: Informações Gerais */}
@@ -1519,21 +1791,46 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
                         {allAvailableTags.map(tag => {
                           const isSelected = selectedTagsList.some(t => t.toLowerCase() === tag.toLowerCase());
                           return (
-                            <button
+                            <div
                               key={tag}
-                              type="button"
-                              onClick={() => toggleTag(tag)}
-                              className={`h-7 px-3 rounded-full text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer select-none ${
+                              className={`group/tag relative inline-flex items-center h-7 rounded-full text-xs font-semibold transition-all select-none ${
                                 isSelected
-                                  ? 'bg-[#0071E3] text-white shadow-xs scale-[1.02]'
+                                  ? 'bg-[#0071E3] text-white shadow-xs'
                                   : 'bg-white text-[#1D1D1F] hover:bg-[#E8E8EA] border border-[#E8E8EA]'
                               }`}
                             >
-                              <span className="material-symbols-outlined text-[14px]">
-                                {isSelected ? 'check' : 'add'}
-                              </span>
-                              {tag}
-                            </button>
+                              <button
+                                type="button"
+                                onClick={() => toggleTag(tag)}
+                                title={isSelected ? `Remover tag "${tag}" deste perfil` : `Adicionar tag "${tag}"`}
+                                className="h-full pl-3 pr-2 flex items-center gap-1.5 cursor-pointer"
+                              >
+                                <span className="material-symbols-outlined text-[13px]">
+                                  {isSelected ? 'check' : 'add'}
+                                </span>
+                                <span>{tag}</span>
+                              </button>
+
+                              {isSelected ? (
+                                <button
+                                  type="button"
+                                  onClick={() => toggleTag(tag)}
+                                  title={`Desmarcar tag "${tag}" deste perfil`}
+                                  className="h-5 w-5 mr-1 rounded-full flex items-center justify-center transition-all cursor-pointer text-white/70 hover:text-white hover:bg-white/20"
+                                >
+                                  <span className="material-symbols-outlined text-[13px] leading-none">close</span>
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={(e) => handleDeleteTag(tag, e)}
+                                  title={`Excluir tag "${tag}" do catálogo do sistema`}
+                                  className="h-5 w-5 mr-1 rounded-full flex items-center justify-center transition-all cursor-pointer opacity-0 group-hover/tag:opacity-100 text-[#86868B] hover:text-[#DC2626] hover:bg-[#DC2626]/10"
+                                >
+                                  <span className="material-symbols-outlined text-[12px] leading-none">delete</span>
+                                </button>
+                              )}
+                            </div>
                           );
                         })}
 
@@ -1690,77 +1987,115 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
         </div>
       )}
 
-      {/* ─── Modal Flutuante: Editar Perfil ─── */}
+      {/* ─── Modal Flutuante: Editar Perfil (Visual Apple Clean /DESIGN - Ref Imagem 2) ─── */}
       {editingAccount && (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto animate-fadeIn">
           <div className="relative w-full max-w-[620px] max-h-[90vh] bg-white rounded-2xl border border-[#E8E8EA] shadow-[0_20px_60px_rgba(0,0,0,0.15)] overflow-hidden flex flex-col animate-modal-scale my-auto">
             
             {/* Modal Header */}
             <header className="px-6 py-5 border-b border-[#E8E8EA] flex items-center justify-between bg-white flex-shrink-0">
-              <div className="flex items-center gap-2">
-                <span className="material-symbols-outlined text-[20px] text-[#0071E3]">edit</span>
-                <h3 className="text-lg font-bold tracking-[-0.02em] text-[#1D1D1F]">Editar Perfil</h3>
+              <div>
+                <h2 className="text-lg font-bold tracking-[-0.02em] text-[#1D1D1F]">
+                  Editar Perfil @{editingAccount.display_name || editingAccount.username}
+                </h2>
+                <p className="text-xs text-[#86868B] mt-0.5">
+                  Atualize os dados de acesso, tag e proxy do ambiente isolado.
+                </p>
               </div>
               <button
                 type="button"
                 onClick={() => setEditingAccount(null)}
                 className="w-8 h-8 rounded-full bg-[#F5F5F7] hover:bg-[#E8E8EA] flex items-center justify-center text-[#86868B] hover:text-[#1D1D1F] transition-colors cursor-pointer"
+                title="Fechar"
               >
                 <span className="material-symbols-outlined text-[18px]">close</span>
               </button>
             </header>
 
-            {/* Modal Body */}
+            {/* Modal Body (Scrollable) */}
             <main className="p-6 overflow-y-auto space-y-5 flex-1 custom-scrollbar bg-[#FAFAFC]">
-              <form id="edit-profile-form" onSubmit={handleSaveEdit} className="space-y-5">
-                
-                {/* Avatar + Nome de Exibição */}
-                <div className="flex items-center gap-4 bg-white p-4 rounded-xl border border-[#E8E8EA]">
-                  <label className="relative cursor-pointer group flex-shrink-0" title="Clique para alterar a foto de perfil">
-                    <div className="w-16 h-16 rounded-full overflow-hidden border-2 border-[#E8E8EA] group-hover:border-[#0071E3] transition-colors shadow-sm flex items-center justify-center bg-[#F5F5F7]">
-                      {editAvatarPreview ? (
-                        <img src={editAvatarPreview} alt="avatar" className="w-full h-full object-cover" />
-                      ) : (
-                        <span className="material-symbols-outlined text-[32px] text-[#86868B]">account_circle</span>
-                      )}
-                      <div className="absolute inset-0 rounded-full bg-black/30 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
-                        <span className="material-symbols-outlined text-white text-[18px]">photo_camera</span>
+              
+              {/* Seção 1: Informações Gerais */}
+              <section className="bg-white rounded-xl border border-[#E8E8EA] p-5 shadow-xs space-y-4">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-[#86868B]">Informações Gerais</h3>
+
+                {/* Avatar e Nome de Usuário Lado a Lado */}
+                <div className="flex items-center gap-3.5">
+                  <div className="relative shrink-0">
+                    <label className="relative cursor-pointer group block" title="Clique para alterar a foto do perfil">
+                      <div className="w-[52px] h-[52px] rounded-full overflow-hidden border-2 border-[#E8E8EA] group-hover:border-[#0071E3] transition-all shadow-xs flex items-center justify-center bg-[#F5F5F7] relative">
+                        {editAvatarPreview ? (
+                          <img src={editAvatarPreview} alt="avatar" className="w-full h-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full bg-gradient-to-tr from-[#0071E3]/10 to-[#4da3ff]/20 flex items-center justify-center text-[#0071E3]">
+                            <span className="material-symbols-outlined text-[28px]">account_circle</span>
+                          </div>
+                        )}
+                        <div className="absolute inset-0 bg-black/40 backdrop-blur-[1px] opacity-0 group-hover:opacity-100 flex items-center justify-center transition-all text-white">
+                          <span className="material-symbols-outlined text-[16px]">photo_camera</span>
+                        </div>
                       </div>
-                    </div>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      className="hidden"
-                      onChange={e => {
-                        const f = e.target.files[0];
-                        if (!f) return;
-                        setEditAvatarFile(f);
-                        setEditAvatarPreview(URL.createObjectURL(f));
-                      }}
-                    />
-                  </label>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={e => {
+                          const f = e.target.files[0];
+                          if (!f) return;
+                          setEditAvatarFile(f);
+                          setEditAvatarPreview(URL.createObjectURL(f));
+                        }}
+                      />
+                    </label>
+                  </div>
 
                   <div className="flex-1 min-w-0">
-                    <label className="block text-xs font-semibold text-[#1D1D1F] mb-1">
-                      Nome do Perfil (@username)
+                    <label className="block text-xs font-semibold text-[#1D1D1F] mb-1.5">
+                      Nome do perfil / Usuário
                     </label>
                     <input
                       type="text"
-                      className="w-full h-10 rounded-xl bg-[#F5F5F7] px-3.5 text-xs font-medium text-[#1D1D1F] border border-transparent focus:outline-none focus:bg-white focus:border-[#0071E3] focus:ring-4 focus:ring-[#0071E3]/15 transition-all"
-                      placeholder="Ex: markus"
                       value={editDisplayName}
                       onChange={e => setEditDisplayName(e.target.value)}
+                      placeholder="Ex: @meuperfil ou Nome de exibição"
+                      required
+                      className="w-full h-10 rounded-xl bg-[#F5F5F7] px-3.5 text-xs font-medium text-[#1D1D1F] placeholder:text-[#86868B] border border-transparent focus:outline-none focus:bg-white focus:border-[#0071E3] focus:ring-4 focus:ring-[#0071E3]/15 transition-all"
                     />
-                    <p className="text-[10px] text-[#86868B] mt-1">
-                      O nome e o identificador @ serão sincronizados com este valor.
-                    </p>
                   </div>
                 </div>
 
-                {/* Tags Picker */}
-                <div className="bg-white p-4 rounded-xl border border-[#E8E8EA] space-y-2">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs font-semibold text-[#1D1D1F]">Tags do Perfil</label>
+                {/* Status da Conta (Segmented Control Compacto) */}
+                <div>
+                  <label className="block text-xs font-semibold text-[#1D1D1F] mb-1.5">
+                    Status da Conta
+                  </label>
+                  <div className="grid grid-cols-4 gap-1.5 p-1 bg-[#F5F5F7] rounded-xl border border-[#E8E8EA]/80">
+                    {STATUS_OPTIONS.map(status => {
+                      const isSelected = editStatus === status.id;
+                      return (
+                        <button
+                          key={status.id}
+                          type="button"
+                          onClick={() => setEditStatus(status.id)}
+                          className={`h-8 px-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                            isSelected
+                              ? 'bg-white shadow-xs font-bold'
+                              : 'text-[#86868B] hover:text-[#1D1D1F] hover:bg-white/50'
+                          }`}
+                          style={isSelected ? { color: status.color } : {}}
+                        >
+                          <span className={`w-1.5 h-1.5 rounded-full ${status.dot} ${isSelected ? 'animate-pulse' : 'opacity-40'}`} />
+                          <span>{status.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Tags do Perfil */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-xs font-semibold text-[#1D1D1F]">Tags do Perfil</label>
                     {editSelectedTagsList.length > 0 && (
                       <span className="text-[11px] font-semibold text-[#0071E3]">
                         {editSelectedTagsList.length} selecionada{editSelectedTagsList.length > 1 ? 's' : ''}
@@ -1768,26 +2103,51 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
                     )}
                   </div>
                   
-                  <div className="p-3 rounded-xl bg-[#F5F5F7] border border-[#E8E8EA]">
-                    <div className="flex flex-wrap items-center gap-1.5">
+                  <div className="p-3.5 rounded-xl bg-[#F5F5F7] border border-[#E8E8EA]">
+                    <div className="flex flex-wrap items-center gap-2">
                       {allAvailableTags.map(tag => {
                         const isSelected = editSelectedTagsList.some(t => t.toLowerCase() === tag.toLowerCase());
                         return (
-                          <button
+                          <div
                             key={tag}
-                            type="button"
-                            onClick={() => toggleEditTag(tag)}
-                            className={`h-7 px-3 rounded-full text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer select-none ${
+                            className={`group/tag relative inline-flex items-center h-7 rounded-full text-xs font-semibold transition-all select-none ${
                               isSelected
-                                ? 'bg-[#0071E3] text-white shadow-xs scale-[1.02]'
+                                ? 'bg-[#0071E3] text-white shadow-xs'
                                 : 'bg-white text-[#1D1D1F] hover:bg-[#E8E8EA] border border-[#E8E8EA]'
                             }`}
                           >
-                            <span className="material-symbols-outlined text-[13px]">
-                              {isSelected ? 'check' : 'add'}
-                            </span>
-                            {tag}
-                          </button>
+                            <button
+                              type="button"
+                              onClick={() => toggleEditTag(tag)}
+                              title={isSelected ? `Remover tag "${tag}" deste perfil` : `Adicionar tag "${tag}"`}
+                              className="h-full pl-3 pr-2 flex items-center gap-1.5 cursor-pointer"
+                            >
+                              <span className="material-symbols-outlined text-[13px]">
+                                {isSelected ? 'check' : 'add'}
+                              </span>
+                              <span>{tag}</span>
+                            </button>
+
+                            {isSelected ? (
+                              <button
+                                type="button"
+                                onClick={() => toggleEditTag(tag)}
+                                title={`Desmarcar tag "${tag}" deste perfil`}
+                                className="h-5 w-5 mr-1 rounded-full flex items-center justify-center transition-all cursor-pointer text-white/70 hover:text-white hover:bg-white/20"
+                              >
+                                <span className="material-symbols-outlined text-[13px] leading-none">close</span>
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={(e) => handleDeleteTag(tag, e)}
+                                title={`Excluir tag "${tag}" do catálogo do sistema`}
+                                className="h-5 w-5 mr-1 rounded-full flex items-center justify-center transition-all cursor-pointer opacity-0 group-hover/tag:opacity-100 text-[#86868B] hover:text-[#DC2626] hover:bg-[#DC2626]/10"
+                              >
+                                <span className="material-symbols-outlined text-[12px] leading-none">delete</span>
+                              </button>
+                            )}
+                          </div>
                         );
                       })}
 
@@ -1803,13 +2163,13 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
                             }
                           }}
                           placeholder="+ Criar tag"
-                          className="h-7 w-24 rounded-full bg-white px-3 text-xs font-medium text-[#1D1D1F] placeholder:text-[#86868B] border border-[#E8E8EA] focus:outline-none focus:border-[#0071E3] transition-all"
+                          className="h-7 w-28 rounded-full bg-white px-3 text-xs font-medium text-[#1D1D1F] placeholder:text-[#86868B] border border-[#E8E8EA] focus:outline-none focus:border-[#0071E3] transition-all"
                         />
                         {editCustomTagInput.trim() && (
                           <button
                             type="button"
                             onClick={handleAddEditCustomTag}
-                            className="h-7 px-2.5 rounded-full bg-[#0071E3] text-white text-xs font-bold hover:bg-[#005CBB] transition-colors cursor-pointer"
+                            className="h-7 px-3 rounded-full bg-[#0071E3] text-white text-xs font-bold hover:bg-[#005CBB] transition-colors cursor-pointer"
                           >
                             OK
                           </button>
@@ -1819,24 +2179,44 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
                   </div>
                 </div>
 
-                {/* Proxy URL */}
-                <div className="bg-white p-4 rounded-xl border border-[#E8E8EA] space-y-2">
-                  <label className="block text-xs font-semibold text-[#1D1D1F]">Proxy Dedicado</label>
+                {/* Notas / Observações */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-xs font-semibold text-[#1D1D1F]">Notas / Observações</label>
+                    <span className="text-[10px] font-mono text-[#86868B]">
+                      {editNotes.length} / 1500
+                    </span>
+                  </div>
+                  <textarea
+                    value={editNotes}
+                    onChange={e => setEditNotes(e.target.value.slice(0, 1500))}
+                    placeholder="Escreva anotações importantes para este ambiente..."
+                    className="w-full h-24 rounded-xl bg-[#F5F5F7] p-3 text-xs leading-relaxed font-medium text-[#1D1D1F] placeholder:text-[#86868B] border border-transparent focus:outline-none focus:bg-white focus:border-[#0071E3] focus:ring-4 focus:ring-[#0071E3]/15 transition-all resize-none"
+                  />
+                </div>
+              </section>
+
+              {/* Seção 2: Proxy & Conexão */}
+              <section className="bg-white rounded-xl border border-[#E8E8EA] p-5 shadow-xs space-y-4">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-[#86868B]">Proxy &amp; Conexão</h3>
+
+                <div>
+                  <label className="block text-xs font-semibold text-[#1D1D1F] mb-1.5">Detalhes do Proxy</label>
                   <div className="flex gap-2">
                     <input
                       type="text"
-                      className="flex-1 h-10 rounded-xl bg-[#F5F5F7] px-3.5 text-xs font-medium text-[#1D1D1F] border border-transparent focus:outline-none focus:bg-white focus:border-[#0071E3] focus:ring-4 focus:ring-[#0071E3]/15 transition-all"
-                      placeholder="http://user:pass@ip:port"
                       value={editProxy}
                       onChange={e => { setEditProxy(e.target.value); setEditProxyTestResult(null); }}
+                      placeholder="ip:porta:usuario:senha ou http://user:pass@ip:port"
+                      className="flex-1 h-10 rounded-xl bg-[#F5F5F7] px-3.5 text-xs font-medium text-[#1D1D1F] placeholder:text-[#86868B] border border-transparent focus:outline-none focus:bg-white focus:border-[#0071E3] focus:ring-4 focus:ring-[#0071E3]/15 transition-all"
                     />
                     <button
                       type="button"
-                      className="h-10 px-4 rounded-xl bg-[#F5F5F7] hover:bg-[#E8E8EA] border border-[#E8E8EA] text-xs font-semibold text-[#1D1D1F] flex items-center justify-center gap-1.5 transition-all disabled:opacity-50 cursor-pointer"
                       onClick={handleTestProxy}
-                      disabled={testingProxy}
+                      disabled={testingProxy || !editProxy.trim()}
+                      className="h-10 px-4 rounded-xl bg-[#F5F5F7] hover:bg-[#E8E8EA] border border-[#E8E8EA] text-xs font-semibold text-[#1D1D1F] flex items-center justify-center gap-1.5 transition-all disabled:opacity-50 cursor-pointer flex-shrink-0"
                     >
-                      {testingProxy ? <span className="spinner !w-3 !h-3" /> : "Testar IP"}
+                      {testingProxy ? <span className="spinner !w-3 !h-3" /> : 'Testar IP'}
                     </button>
                   </div>
 
@@ -1857,17 +2237,8 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
                     </div>
                   )}
                 </div>
+              </section>
 
-                {/* Notas */}
-                <div className="bg-white p-4 rounded-xl border border-[#E8E8EA] space-y-2">
-                  <label className="block text-xs font-semibold text-[#1D1D1F]">Notas / Observações</label>
-                  <textarea
-                    className="w-full h-24 rounded-xl bg-[#F5F5F7] p-3 text-xs leading-relaxed font-medium text-[#1D1D1F] border border-transparent focus:outline-none focus:bg-white focus:border-[#0071E3] focus:ring-4 focus:ring-[#0071E3]/15 transition-all resize-none"
-                    value={editNotes}
-                    onChange={e => setEditNotes(e.target.value)}
-                  />
-                </div>
-              </form>
             </main>
 
             {/* Modal Sticky Footer */}
@@ -1880,17 +2251,18 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
                 Cancelar
               </button>
               <button
-                type="submit"
-                form="edit-profile-form"
+                type="button"
+                onClick={handleSaveEdit}
                 disabled={savingEdit}
-                className="h-10 px-6 rounded-xl bg-[#0071E3] hover:bg-[#005CBB] text-white text-xs font-bold shadow-[0_4px_14px_rgba(0,113,227,0.25)] transition-all disabled:opacity-50 cursor-pointer"
+                className="h-10 px-6 rounded-xl bg-[#0071E3] hover:bg-[#005CBB] text-white text-xs font-bold shadow-[0_4px_14px_rgba(0,113,227,0.25)] transition-all disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
               >
-                {savingEdit ? <span className="spinner !w-3.5 !h-3.5 !border-white/30 !border-t-white" /> : "Salvar"}
+                {savingEdit ? <span className="spinner !w-3.5 !h-3.5 !border-white/30 !border-t-white" /> : 'Salvar Alterações'}
               </button>
             </footer>
           </div>
         </div>
       )}
+
 
       {/* ─── Modal 3: Apelido da Conta (Fiel ao Print) ─── */}
       {isNicknameModalOpen && nicknameData && (
@@ -1981,6 +2353,125 @@ export default function MultiLogin({ triggerToast, isVisible = true, openGlobalS
               </p>
             </form>
 
+          </div>
+        </div>
+      )}
+
+      {/* ─── Modal Flutuante: Gerenciador de Extensões (/DESIGN Apple Minimalist) ─── */}
+      {isExtensionsModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto animate-fadeIn">
+          <div className="relative w-full max-w-[680px] max-h-[90vh] bg-white rounded-2xl border border-[#E8E8EA] shadow-[0_20px_60px_rgba(0,0,0,0.18)] overflow-hidden flex flex-col animate-modal-scale my-auto">
+            
+            {/* Modal Header */}
+            <header className="px-6 py-5 border-b border-[#E8E8EA] flex items-center justify-between bg-white flex-shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-[#EFF6FF] text-[#0071E3] flex items-center justify-center shadow-xs flex-shrink-0">
+                  <span className="material-symbols-outlined text-[22px]">extension</span>
+                </div>
+                <div>
+                  <h2 className="text-lg font-bold tracking-[-0.02em] text-[#1D1D1F]">Gerenciador de Extensões</h2>
+                  <p className="text-xs text-[#86868B] mt-0.5">Controle extensões ativas globalmente nos navegadores isolados.</p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                {/* Upload ZIP button */}
+                <label className="h-9 px-3.5 rounded-full bg-[#F5F5F7] hover:bg-[#E8E8EA] active:scale-95 text-[#1D1D1F] text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-xs border border-[#E8E8EA]">
+                  <span className="material-symbols-outlined text-[16px] text-[#0071E3]">upload_file</span>
+                  <span>{uploadingExtZip ? 'Carregando...' : 'Instalar ZIP'}</span>
+                  <input
+                    type="file"
+                    accept=".zip"
+                    onChange={handleUploadExtensionZip}
+                    disabled={uploadingExtZip}
+                    className="hidden"
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  onClick={() => setIsExtensionsModalOpen(false)}
+                  className="w-8 h-8 rounded-full bg-[#F5F5F7] hover:bg-[#E8E8EA] flex items-center justify-center text-[#86868B] hover:text-[#1D1D1F] transition-colors cursor-pointer"
+                >
+                  <span className="material-symbols-outlined text-[18px]">close</span>
+                </button>
+              </div>
+            </header>
+
+            {/* Modal Body */}
+            <main className="p-6 overflow-y-auto space-y-4 flex-1 custom-scrollbar bg-[#FAFAFC]">
+              {loadingExtensions && extensionsList.length === 0 ? (
+                <div className="flex flex-col justify-center items-center h-48 gap-3">
+                  <span className="spinner" style={{ width: '30px', height: '30px' }} />
+                  <span className="text-xs font-medium text-[#86868B]">Carregando catálogo de extensões...</span>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                  {extensionsList.map(ext => {
+                    const isEnabled = ext.enabled !== false;
+                    return (
+                      <div
+                        key={ext.id}
+                        className={`p-4 rounded-2xl border transition-all bg-white shadow-2xs flex flex-col justify-between gap-3 ${
+                          isEnabled ? 'border-[#0071E3]/25 hover:border-[#0071E3]/40' : 'border-[#E8E8EA] opacity-80'
+                        }`}
+                      >
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className="w-7 h-7 rounded-lg bg-[#EFF6FF] text-[#0071E3] flex items-center justify-center text-xs font-bold flex-shrink-0">
+                                <span className="material-symbols-outlined text-[16px]">{ext.icon || 'extension'}</span>
+                              </span>
+                              <span className="text-xs font-bold text-[#1D1D1F] truncate">{ext.name}</span>
+                            </div>
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#F5F5F7] text-[#86868B] font-mono border border-[#E8E8EA] flex-shrink-0">
+                              v{ext.version}
+                            </span>
+                          </div>
+
+                          <p className="text-[11px] text-[#86868B] leading-relaxed line-clamp-2">
+                            {ext.description}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center justify-between pt-2 border-t border-[#F0F0F2] text-[11px]">
+                          <span className="px-2 py-0.5 rounded-md bg-[#F5F5F7] text-[#86868B] text-[10px] font-semibold">
+                            {ext.is_builtin ? 'Embutida' : 'Customizada'}
+                          </span>
+
+                          <button
+                            type="button"
+                            onClick={() => handleToggleGlobalExtension(ext.id, isEnabled)}
+                            className={`h-7 px-3 rounded-full text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                              isEnabled
+                                ? 'bg-[#ECFDF5] text-[#059669] hover:bg-[#D1FAE5] border border-[#A7F3D0]'
+                                : 'bg-[#F5F5F7] text-[#86868B] hover:bg-[#E8E8EA] border border-[#E8E8EA]'
+                            }`}
+                          >
+                            <span className={`w-2 h-2 rounded-full ${isEnabled ? 'bg-[#059669]' : 'bg-[#86868B]'}`} />
+                            <span>{isEnabled ? 'Ativa' : 'Desativada'}</span>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </main>
+
+            {/* Modal Footer */}
+            <footer className="px-6 py-4 border-t border-[#E8E8EA] bg-white flex items-center justify-between gap-3 flex-shrink-0">
+              <span className="text-[11px] text-[#86868B]">
+                💡 As extensões ativas são injetadas em todas as janelas do Chrome externas.
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsExtensionsModalOpen(false)}
+                className="h-9 px-5 rounded-xl bg-[#0071E3] hover:bg-[#005CBB] text-white text-xs font-bold transition-all shadow-xs cursor-pointer"
+              >
+                Concluído
+              </button>
+            </footer>
           </div>
         </div>
       )}

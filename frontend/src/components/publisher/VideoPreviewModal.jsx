@@ -26,6 +26,19 @@ export default function VideoPreviewModal({
   const [duration, setDuration] = useState(0);
   const [isLiked, setIsLiked] = useState(false);
   const [showControls, setShowControls] = useState(false);
+  const [imgAspect, setImgAspect] = useState('1/1'); // '1/1' | '4/5'
+
+  const handleImageLoad = (e) => {
+    const { naturalWidth, naturalHeight } = e.currentTarget;
+    if (naturalWidth && naturalHeight) {
+      const ratio = naturalHeight / naturalWidth;
+      if (ratio >= 1.1) {
+        setImgAspect('4/5');
+      } else {
+        setImgAspect('1/1');
+      }
+    }
+  };
 
   // Caption Editing & Presets
   const [isEditingCaption, setIsEditingCaption] = useState(false);
@@ -104,6 +117,7 @@ export default function VideoPreviewModal({
 
   const currentVideo = video || (videos.length > 0 ? videos[currentIndex] : null);
   const hasMultiple = videos.length > 1;
+  const isImage = currentVideo?.post_type === 'image' || currentVideo?.media_type === 'image' || /\.(jpe?g|png|webp)$/i.test(currentVideo?.video_name || currentVideo?.video_path || '');
 
   // Sync edited caption when current video changes
   useEffect(() => {
@@ -154,17 +168,17 @@ export default function VideoPreviewModal({
         onNavigate(currentIndex - 1);
       } else if (e.key === 'ArrowRight' && hasMultiple && onNavigate && currentIndex < videos.length - 1) {
         onNavigate(currentIndex + 1);
-      } else if (e.code === 'Space') {
+      } else if (e.code === 'Space' && !isImage) {
         e.preventDefault();
         togglePlay();
-      } else if (e.key.toLowerCase() === 'm') {
+      } else if (e.key.toLowerCase() === 'm' && !isImage) {
         toggleMute();
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, currentIndex, hasMultiple, videos.length, isPlaying, isMuted, presetsDropdownOpen]);
+  }, [isOpen, currentIndex, hasMultiple, videos.length, isPlaying, isMuted, presetsDropdownOpen, isImage]);
 
   // Video event handlers
   const togglePlay = () => {
@@ -257,122 +271,202 @@ export default function VideoPreviewModal({
         onClick={(e) => e.stopPropagation()}
       >
         {/* ========================================================================= */}
-        {/* LEFT COLUMN: REALISTIC SMARTPHONE REELS FRAME                              */}
+        {/* LEFT COLUMN: 9:16 / 1:1 MEDIA VIEWER (IMAGE & VIDEO)                      */}
         {/* ========================================================================= */}
-        <div className="md:w-[48%] bg-[#F5F5F7] flex flex-col items-center justify-center p-4 sm:p-6 relative border-b md:border-b-0 md:border-r border-[#E8E8ED] select-none overflow-hidden">
-
-          {/* Smartphone Frame (9:16 Ratio) */}
-          <div
-            className="relative w-full max-w-[310px] sm:max-w-[325px] h-[94%] max-h-[720px] rounded-[36px] bg-black border-[5px] border-[#1D1D1F] shadow-[0_20px_45px_rgba(0,0,0,0.18)] overflow-hidden flex flex-col group/phone"
-            onMouseEnter={() => setShowControls(true)}
-            onMouseLeave={() => setShowControls(false)}
-          >
-            {/* Dynamic Island / Notch */}
-            <div className="absolute top-2.5 left-1/2 -translate-x-1/2 w-24 h-4 bg-black rounded-full z-40 flex items-center justify-center border border-white/10 shadow-sm pointer-events-none">
-              <div className="w-2.5 h-2.5 rounded-full bg-[#18181A] mr-4 border border-white/5" />
-              <div className="w-2 h-2 rounded-full bg-[#0a192f]/60" />
-            </div>
-
-            {/* Video Player */}
-            <div
-              className="relative w-full h-full bg-black flex items-center justify-center cursor-pointer overflow-hidden group/video"
-              onClick={togglePlay}
-            >
-              <video
-                ref={videoRef}
-                key={currentVideo.video_path}
-                src={getVideoSrc(currentVideo)}
-                autoPlay
-                loop
-                muted={isMuted}
-                playsInline
-                onPlay={() => setIsPlaying(true)}
-                onPause={() => setIsPlaying(false)}
-                onTimeUpdate={handleTimeUpdate}
-                onLoadedMetadata={handleLoadedMetadata}
-                className="w-full h-full object-cover"
-              />
-
-              {/* Central Play/Pause Watermark Trigger */}
-              {!isPlaying && (
-                <div className="absolute inset-0 bg-black/40 backdrop-blur-[1px] flex items-center justify-center z-30 transition-all">
-                  <div className="w-16 h-16 rounded-full bg-white/25 backdrop-blur-md border border-white/40 flex items-center justify-center shadow-xl scale-100 hover:scale-105 active:scale-95 transition-transform">
-                    <span className="material-symbols-outlined text-[36px] text-white ml-1">play_arrow</span>
+        <div className="md:w-[46%] lg:w-[44%] bg-[#F2F2F7] flex flex-col items-center justify-center p-3 sm:p-5 relative border-b md:border-b-0 md:border-r border-[#E8E8ED] select-none overflow-hidden">
+          {isImage ? (
+            /* Instagram Feed Mockup Card */
+            <div className="w-full max-w-[340px] bg-white rounded-2xl shadow-[0_10px_35px_rgba(0,0,0,0.06)] border border-[#E8E8ED] overflow-hidden flex flex-col mx-auto select-none transition-all">
+              {/* Card Header */}
+              <div className="px-3.5 py-2.5 flex items-center justify-between border-b border-black/[0.04]">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-[#F58529] via-[#DD2A7B] to-[#8134AF] p-[2px] shrink-0">
+                    <div className="w-full h-full rounded-full bg-white flex items-center justify-center overflow-hidden">
+                      {avatarSrc ? (
+                        <img src={avatarSrc} alt={currentVideo.account_username} className="w-full h-full object-cover" />
+                      ) : (
+                        <div className="w-full h-full bg-gradient-to-tr from-[#0071E3] to-[#4da3ff] flex items-center justify-center text-white text-[10px] font-bold">
+                          {currentVideo.account_username ? currentVideo.account_username.charAt(0).toUpperCase() : 'A'}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="text-[12px] font-semibold text-[#1D1D1F] leading-tight">
+                      {currentVideo.account_username || "usuario_ig"}
+                    </span>
+                    <span className="text-[10px] text-[#86868B] font-medium leading-none mt-0.5">
+                      Feed de Fotos
+                    </span>
                   </div>
                 </div>
-              )}
-
-              {/* Clean Transport & Scrubber Bar at Bottom (visible on hover or when paused) */}
-              <div
-                className={`absolute bottom-0 left-0 right-0 z-30 p-3.5 bg-gradient-to-t from-black/90 via-black/50 to-transparent transition-opacity duration-200 flex flex-col gap-2 ${
-                  showControls || !isPlaying ? 'opacity-100' : 'opacity-0'
-                }`}
-                onClick={(e) => e.stopPropagation()}
-              >
-                {/* Timeline slider */}
-                <div className="flex items-center gap-2">
-                  <input
-                    type="range"
-                    min="0"
-                    max={duration || 100}
-                    step="0.05"
-                    value={currentTime}
-                    onChange={handleSeek}
-                    className="w-full h-1 bg-white/30 hover:bg-white/50 rounded-lg appearance-none cursor-pointer accent-[#0071E3]"
-                  />
-                </div>
-
-                {/* Controls row: Play/Pause, Mute/Unmute, Time indicator */}
-                <div className="flex items-center justify-between text-white text-xs">
-                  <div className="flex items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={togglePlay}
-                      className="w-7 h-7 rounded-full bg-white/20 hover:bg-white/30 flex items-center justify-center text-white transition-all cursor-pointer"
-                      title={isPlaying ? 'Pausar (Espaço)' : 'Reproduzir (Espaço)'}
-                    >
-                      <span className="material-symbols-outlined text-[18px]">
-                        {isPlaying ? 'pause' : 'play_arrow'}
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={toggleMute}
-                      className="w-7 h-7 rounded-full bg-white/20 hover:bg-white/30 flex items-center justify-center text-white transition-all cursor-pointer"
-                      title={isMuted ? 'Ativar Som (M)' : 'Silenciar (M)'}
-                    >
-                      <span className="material-symbols-outlined text-[16px]">
-                        {isMuted ? 'volume_off' : 'volume_up'}
-                      </span>
-                    </button>
-                  </div>
-
-                  <span className="text-[10px] font-mono font-bold text-white/90">
-                    {formatTime(currentTime)} / {formatTime(duration)}
+                <div className="px-2 py-0.5 rounded-full bg-[#F5F5F7] text-[#86868B] text-[10px] font-semibold flex items-center gap-1 border border-[#E8E8ED]">
+                  <span className="material-symbols-outlined text-[13px] text-amber-500">
+                    {imgAspect === '4/5' ? 'stay_current_portrait' : 'crop_square'}
                   </span>
+                  {imgAspect === '4/5' ? '4:5 Retrato' : '1:1 Quadrado'}
                 </div>
               </div>
 
+              {/* Card Image (Adaptive 1:1 or 4:5) */}
+              <div className={`w-full bg-[#EFEFEF] relative overflow-hidden flex items-center justify-center transition-all duration-300 ${
+                imgAspect === '4/5' ? 'aspect-[4/5] max-h-[440px]' : 'aspect-square max-h-[380px]'
+              }`}>
+                <img
+                  key={currentVideo.video_path}
+                  src={getVideoSrc(currentVideo)}
+                  alt={currentVideo.video_name || 'image_post'}
+                  onLoad={handleImageLoad}
+                  className="w-full h-full object-cover select-none animate-fadeIn"
+                />
+              </div>
+
+              {/* Card Action Icons */}
+              <div className="px-3.5 pt-3 pb-1.5 flex items-center justify-between">
+                <div className="flex items-center gap-3.5">
+                  <button
+                    type="button"
+                    onClick={() => setIsLiked(!isLiked)}
+                    className="flex items-center justify-center transition-transform active:scale-80 cursor-pointer"
+                    title={isLiked ? "Descurtir" : "Curtir"}
+                  >
+                    <span className={`material-symbols-outlined text-[23px] transition-colors ${isLiked ? 'text-rose-500 fill-1' : 'text-[#1D1D1F]'}`}>
+                      {isLiked ? 'favorite' : 'favorite_border'}
+                    </span>
+                  </button>
+                  <button type="button" className="flex items-center justify-center text-[#1D1D1F] hover:text-[#0071E3] transition-colors cursor-pointer">
+                    <span className="material-symbols-outlined text-[22px]">chat_bubble_outline</span>
+                  </button>
+                  <button type="button" className="flex items-center justify-center text-[#1D1D1F] hover:text-[#0071E3] transition-colors cursor-pointer">
+                    <span className="material-symbols-outlined text-[22px]">send</span>
+                  </button>
+                </div>
+                <button type="button" className="flex items-center justify-center text-[#1D1D1F] hover:text-[#0071E3] transition-colors cursor-pointer">
+                  <span className="material-symbols-outlined text-[22px]">bookmark_border</span>
+                </button>
+              </div>
+
+              {/* Card Caption Snippet */}
+              <div className="px-3.5 pb-3 flex flex-col gap-1 text-left">
+                <div className="text-[11px] leading-[16px] text-[#1D1D1F] break-words line-clamp-3">
+                  <span className="font-semibold mr-1.5">{currentVideo.account_username || "usuario_ig"}</span>
+                  <span className="text-[#1D1D1F]">{rawCaption || currentVideo.video_name}</span>
+                </div>
+              </div>
             </div>
-          </div>
+          ) : (
+            /* Video Player */
+            <div
+              className="relative h-full max-h-[640px] aspect-[9/16] rounded-2xl bg-black shadow-[0_20px_45px_rgba(0,0,0,0.22)] overflow-hidden flex flex-col group/video border border-black/10"
+              onMouseEnter={() => setShowControls(true)}
+              onMouseLeave={() => setShowControls(false)}
+            >
+              <div
+                className="relative w-full h-full bg-black flex items-center justify-center cursor-pointer overflow-hidden"
+                onClick={togglePlay}
+              >
+                <video
+                  ref={videoRef}
+                  key={currentVideo.video_path}
+                  src={getVideoSrc(currentVideo)}
+                  autoPlay
+                  loop
+                  muted={isMuted}
+                  playsInline
+                  onPlay={() => setIsPlaying(true)}
+                  onPause={() => setIsPlaying(false)}
+                  onTimeUpdate={handleTimeUpdate}
+                  onLoadedMetadata={handleLoadedMetadata}
+                  className="w-full h-full object-cover"
+                />
+
+                {/* Central Play/Pause Watermark Trigger */}
+                {!isPlaying && (
+                  <div className="absolute inset-0 bg-black/40 backdrop-blur-[1px] flex items-center justify-center z-30 transition-all">
+                    <div className="w-16 h-16 rounded-full bg-white/25 backdrop-blur-md border border-white/40 flex items-center justify-center shadow-xl scale-100 hover:scale-105 active:scale-95 transition-transform">
+                      <span className="material-symbols-outlined text-[36px] text-white ml-1">play_arrow</span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Clean Transport & Scrubber Bar at Bottom */}
+                <div
+                  className={`absolute bottom-0 left-0 right-0 z-30 p-3.5 bg-gradient-to-t from-black/90 via-black/50 to-transparent transition-opacity duration-200 flex flex-col gap-2 ${
+                    showControls || !isPlaying ? 'opacity-100' : 'opacity-0'
+                  }`}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {/* Timeline slider */}
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="range"
+                      min="0"
+                      max={duration || 100}
+                      step="0.05"
+                      value={currentTime}
+                      onChange={handleSeek}
+                      className="w-full h-1 bg-white/30 hover:bg-white/50 rounded-lg appearance-none cursor-pointer accent-[#0071E3]"
+                    />
+                  </div>
+
+                  {/* Controls row: Play/Pause, Mute/Unmute, Time indicator */}
+                  <div className="flex items-center justify-between text-white text-xs">
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={togglePlay}
+                        className="w-7 h-7 rounded-full bg-white/20 hover:bg-white/30 flex items-center justify-center text-white transition-all cursor-pointer"
+                        title={isPlaying ? 'Pausar (Espaço)' : 'Reproduzir (Espaço)'}
+                      >
+                        <span className="material-symbols-outlined text-[18px]">
+                          {isPlaying ? 'pause' : 'play_arrow'}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={toggleMute}
+                        className="w-7 h-7 rounded-full bg-white/20 hover:bg-white/30 flex items-center justify-center text-white transition-all cursor-pointer"
+                        title={isMuted ? 'Ativar Som (M)' : 'Silenciar (M)'}
+                      >
+                        <span className="material-symbols-outlined text-[16px]">
+                          {isMuted ? 'volume_off' : 'volume_up'}
+                        </span>
+                      </button>
+                    </div>
+
+                    <span className="text-[10px] font-mono font-bold text-white/90">
+                      {formatTime(currentTime)} / {formatTime(duration)}
+                    </span>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          )}
         </div>
 
         {/* ========================================================================= */}
         {/* RIGHT COLUMN: METADATA, CAPTION EDITOR & QUEUE CONTROLS (LIGHT THEME)    */}
         {/* ========================================================================= */}
-        <div className="md:w-[52%] flex flex-col justify-between bg-white p-6 sm:p-7 overflow-y-auto custom-scrollbar text-left">
+        <div className="md:w-[54%] lg:w-[56%] flex flex-col justify-between bg-white p-6 sm:p-7 overflow-y-auto custom-scrollbar text-left">
           
           {/* Top Bar / Header */}
           <div>
             <div className="flex items-center justify-between pb-4 border-b border-[#E8E8ED]">
               <div className="flex items-center gap-3 overflow-hidden">
-                <div className="w-9 h-9 rounded-xl bg-[#0071E3]/10 text-[#0071E3] flex items-center justify-center shrink-0 border border-[#0071E3]/20 shadow-2xs">
-                  <span className="material-symbols-outlined text-[20px]">smart_display</span>
+                <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border shadow-2xs ${
+                  isImage ? 'bg-amber-500/10 text-amber-600 border-amber-500/20' : 'bg-[#0071E3]/10 text-[#0071E3] border-[#0071E3]/20'
+                }`}>
+                  <span className="material-symbols-outlined text-[20px]">
+                    {isImage ? 'image' : 'smart_display'}
+                  </span>
                 </div>
                 <div className="flex flex-col min-w-0">
-                  <span className="text-[10px] font-extrabold text-[#0071E3] uppercase tracking-wider flex items-center gap-1.5">
-                    Prévia do Post
+                  <span className={`text-[10px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 ${
+                    isImage ? 'text-amber-600' : 'text-[#0071E3]'
+                  }`}>
+                    Prévia do Post ({isImage ? 'Feed' : 'Reels'})
                     {hasMultiple && (
                       <span className="bg-[#F5F5F7] border border-[#E8E8ED] text-[#1D1D1F] text-[9px] px-2 py-0.2 rounded-full font-bold">
                         {currentIndex + 1} de {videos.length}
@@ -380,7 +474,7 @@ export default function VideoPreviewModal({
                     )}
                   </span>
                   <h3 className="text-sm font-bold text-[#1D1D1F] truncate max-w-[280px] sm:max-w-[340px]" title={currentVideo.video_name}>
-                    {currentVideo.video_name || 'video_post.mp4'}
+                    {currentVideo.video_name || (isImage ? 'image_post.jpg' : 'video_post.mp4')}
                   </h3>
                 </div>
               </div>
@@ -424,61 +518,97 @@ export default function VideoPreviewModal({
                   <span className="text-xs font-bold text-[#1D1D1F] truncate" title={currentVideo.account_username}>
                     @{currentVideo.account_username || 'Selecione uma conta'}
                   </span>
-                  <span className="text-[9px] text-emerald-600 font-semibold flex items-center gap-1 mt-0.5">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span> Instagram Reel
-                  </span>
+                  {isImage ? (
+                    <span className="text-[9px] text-amber-600 font-semibold flex items-center gap-1 mt-0.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span> Instagram Feed (Foto)
+                    </span>
+                  ) : (
+                    <span className="text-[9px] text-emerald-600 font-semibold flex items-center gap-1 mt-0.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span> Instagram Reel
+                    </span>
+                  )}
                 </div>
               </div>
 
               {/* Schedule Box with Integrated Date/Time Picker */}
-              {onUpdateScheduleTime ? (
-                <CustomDateTimePicker
-                  mode="datetime"
-                  value={currentVideo.scheduled_time || new Date().toISOString()}
-                  onChange={(newVal) => onUpdateScheduleTime(currentIndex, newVal)}
-                  renderTrigger={({ open, isOpen }) => (
-                    <div
-                      onClick={open}
-                      className={`bg-[#F5F5F7] border transition-all rounded-2xl p-3.5 flex items-center gap-3 cursor-pointer group hover:bg-[#EFF6FF]/60 hover:border-[#0071E3]/40 ${
-                        isOpen ? 'border-[#0071E3] ring-2 ring-[#0071E3]/15 bg-[#EFF6FF]/40' : 'border-[#E8E8ED]'
-                      }`}
-                      title="Clique para alterar a data e o horário"
-                    >
-                      <div className="w-11 h-11 rounded-2xl bg-[#0071E3]/10 text-[#0071E3] flex items-center justify-center shrink-0 border border-[#0071E3]/20 shadow-2xs group-hover:scale-105 transition-transform">
+              {(() => {
+                const getScheduleDetails = (val) => {
+                  if (!val) return { date: 'Publicação Imediata', time: null };
+                  const d = new Date(val);
+                  if (isNaN(d.getTime())) return { date: 'Data Inválida', time: null };
+                  return {
+                    date: d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' }),
+                    time: d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+                  };
+                };
+
+                const scheduleDetails = getScheduleDetails(currentVideo.scheduled_time);
+
+                return onUpdateScheduleTime ? (
+                  <CustomDateTimePicker
+                    mode="datetime"
+                    value={currentVideo.scheduled_time || new Date().toISOString()}
+                    onChange={(newVal) => onUpdateScheduleTime(currentIndex, newVal)}
+                    renderTrigger={({ open, isOpen }) => (
+                      <div
+                        onClick={open}
+                        className={`bg-[#F5F5F7] border transition-all rounded-2xl p-3.5 flex items-center justify-between gap-2.5 cursor-pointer group hover:bg-[#EFF6FF]/60 hover:border-[#0071E3]/40 ${
+                          isOpen ? 'border-[#0071E3] ring-2 ring-[#0071E3]/15 bg-[#EFF6FF]/40' : 'border-[#E8E8ED]'
+                        }`}
+                        title="Clique para alterar a data e o horário"
+                      >
+                        <div className="flex items-center gap-3 min-w-0 flex-1">
+                          <div className="w-11 h-11 rounded-2xl bg-[#0071E3]/10 text-[#0071E3] flex items-center justify-center shrink-0 border border-[#0071E3]/20 shadow-2xs group-hover:scale-105 transition-transform">
+                            <span className="material-symbols-outlined text-[20px]">schedule</span>
+                          </div>
+                          <div className="flex flex-col min-w-0">
+                            <span className="text-[10px] font-bold text-[#86868B] uppercase tracking-wider whitespace-nowrap">
+                              Horário Previsto
+                            </span>
+                            <span className="text-xs font-bold text-[#1D1D1F] group-hover:text-[#0071E3] transition-colors leading-snug mt-0.5">
+                              {scheduleDetails.date}
+                            </span>
+                            {scheduleDetails.time && (
+                              <span className="text-[11px] font-semibold text-[#86868B] group-hover:text-[#0071E3]/80 transition-colors leading-tight mt-0.5">
+                                {scheduleDetails.time}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Lápis de Editar idêntico ao da Legenda */}
+                        <div className="shrink-0">
+                          <span className="px-2.5 py-1 rounded-xl text-[10px] font-bold transition-all flex items-center gap-1 border shadow-2xs bg-white group-hover:bg-[#F5F5F7] text-[#1D1D1F] border-[#E8E8ED] group-hover:border-[#0071E3]/40 group-hover:text-[#0071E3]">
+                            <span className="material-symbols-outlined text-[13px]">edit</span>
+                            <span>Editar</span>
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  />
+                ) : (
+                  <div className="bg-[#F5F5F7] border border-[#E8E8ED] rounded-2xl p-3.5 flex items-center justify-between gap-2.5">
+                    <div className="flex items-center gap-3 min-w-0 flex-1">
+                      <div className="w-11 h-11 rounded-2xl bg-[#0071E3]/10 text-[#0071E3] flex items-center justify-center shrink-0 border border-[#0071E3]/20 shadow-2xs">
                         <span className="material-symbols-outlined text-[20px]">schedule</span>
                       </div>
                       <div className="flex flex-col min-w-0 flex-1">
-                        <span className="text-[10px] font-bold text-[#86868B] uppercase tracking-wider">Horário Previsto</span>
-                        <span className="text-xs font-bold text-[#1D1D1F] truncate group-hover:text-[#0071E3] transition-colors">
-                          {currentVideo.scheduled_time
-                            ? new Date(currentVideo.scheduled_time).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })
-                            : 'Publicação Imediata (Clique p/ agendar)'}
+                        <span className="text-[10px] font-bold text-[#86868B] uppercase tracking-wider whitespace-nowrap">
+                          Horário Previsto
                         </span>
-                        <span className="text-[9px] text-[#86868B] font-medium mt-0.5">
-                          Fuso: Horário Local
+                        <span className="text-xs font-bold text-[#1D1D1F] leading-snug mt-0.5">
+                          {scheduleDetails.date}
                         </span>
+                        {scheduleDetails.time && (
+                          <span className="text-[11px] font-semibold text-[#86868B] leading-tight mt-0.5">
+                            {scheduleDetails.time}
+                          </span>
+                        )}
                       </div>
                     </div>
-                  )}
-                />
-              ) : (
-                <div className="bg-[#F5F5F7] border border-[#E8E8ED] rounded-2xl p-3.5 flex items-center gap-3">
-                  <div className="w-11 h-11 rounded-2xl bg-[#0071E3]/10 text-[#0071E3] flex items-center justify-center shrink-0 border border-[#0071E3]/20 shadow-2xs">
-                    <span className="material-symbols-outlined text-[20px]">schedule</span>
                   </div>
-                  <div className="flex flex-col min-w-0 flex-1">
-                    <span className="text-[10px] font-bold text-[#86868B] uppercase tracking-wider">Horário Previsto</span>
-                    <span className="text-xs font-bold text-[#1D1D1F] truncate">
-                      {currentVideo.scheduled_time 
-                        ? new Date(currentVideo.scheduled_time).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })
-                        : 'Publicação Imediata'}
-                    </span>
-                    <span className="text-[9px] text-[#86868B] font-medium mt-0.5">
-                      Fuso: Horário Local
-                    </span>
-                  </div>
-                </div>
-              )}
+                );
+              })()}
 
             </div>
 
@@ -776,10 +906,10 @@ export default function VideoPreviewModal({
                   }
                 }}
                 className="px-4 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 hover:border-rose-300 font-bold text-xs transition-all flex items-center gap-1.5 cursor-pointer shadow-2xs active:scale-95"
-                title="Excluir este vídeo do agendamento"
+                title={isImage ? "Excluir esta foto do agendamento" : "Excluir este vídeo do agendamento"}
               >
                 <span className="material-symbols-outlined text-[16px]">delete</span>
-                <span>Excluir Vídeo</span>
+                <span>Excluir {isImage ? 'Foto' : 'Vídeo'}</span>
               </button>
             </div>
 

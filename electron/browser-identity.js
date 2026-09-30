@@ -97,6 +97,28 @@ function getNavigatorPatchScript() {
           configurable: true
         });
       }
+    try {
+      if (typeof window !== 'undefined') {
+        if (window.PublicKeyCredential) {
+          window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = () => Promise.resolve(false);
+          window.PublicKeyCredential.isConditionalMediationAvailable = () => Promise.resolve(false);
+        }
+        if (navigator.credentials) {
+          const origGet = navigator.credentials.get ? navigator.credentials.get.bind(navigator.credentials) : null;
+          navigator.credentials.get = function (options) {
+            if (options && (options.publicKey || options.mediation === 'conditional')) {
+              return new Promise(() => {});
+            }
+            return origGet ? origGet(options) : Promise.resolve(null);
+          };
+          navigator.credentials.create = function (options) {
+            if (options && options.publicKey) {
+              return new Promise(() => {});
+            }
+            return Promise.resolve(null);
+          };
+        }
+      }
     } catch (error) {}
   })()`
 }

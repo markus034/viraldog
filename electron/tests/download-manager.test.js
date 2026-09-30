@@ -304,3 +304,26 @@ test('continues numbering from existing numbered videos without changing images'
   assert.equal(getNumberedVideoFileName(profileDir, 'capa.jpg'), 'capa.jpg')
   assert.equal(getNumberedVideoFileName(profileDir, '005. outro.mp4'), '005. outro.mp4')
 })
+
+test('downloadBatchDirectNative skips existing duplicates and returns correct counts', async (t) => {
+  const { downloadBatchDirectNative } = require('../download-manager')
+  const outDir = temporaryDirectory(t)
+  setDownloadFolder(outDir)
+  t.after(() => setDownloadFolder(null))
+
+  const profileDir = path.join(outDir, 'perfil_teste')
+  fs.mkdirSync(profileDir, { recursive: true })
+  // Create an already existing file > 1024 bytes
+  const existingFile = path.join(profileDir, '20260805_1200_ABC123.mp4')
+  fs.writeFileSync(existingFile, Buffer.alloc(2048, 1))
+
+  const result = await downloadBatchDirectNative('perfil_teste', [
+    { url: 'https://cdn.example/vid1', path: 'perfil_teste/20260805_1200_ABC123.mp4' }
+  ], { concurrency: 8 })
+
+  assert.equal(result.downloaded, 1)
+  assert.equal(result.skipped, 1)
+  assert.equal(result.failed, 0)
+  assert.equal(result.success, true)
+})
+

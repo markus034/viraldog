@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from database import get_db, SessionLocal, Account, AccountProfile, Post, FollowerSnapshot, APP_DATA_DIR
-from schemas import CookieAccountCreate, AccountPatchRequest, AccountProfileUpdate
+from schemas import AccountCreate, CookieAccountCreate, AccountPatchRequest, AccountProfileUpdate
 from routers.auth import get_current_user
 
 AVATARS_DIR = os.path.join(APP_DATA_DIR, "avatars")
@@ -27,8 +27,32 @@ def _download_and_save_avatar_job(account_id: int):
 
         pic_url = None
 
-        # 1. Tentar obter via instagrapi caso haja sessão
-        if acc.session_cookies:
+        # 1. Tentar obter via API Oficial da Meta / Instagram se houver token
+        if acc.fb_access_token:
+            try:
+                # graph.instagram.com/me?fields=profile_picture_url
+                r_ig = requests.get(
+                    "https://graph.instagram.com/me",
+                    params={"fields": "profile_picture_url", "access_token": acc.fb_access_token},
+                    timeout=10
+                )
+                if r_ig.status_code == 200:
+                    pic_url = r_ig.json().get("profile_picture_url")
+                
+                # Se não veio e tiver fb_ig_account_id
+                if not pic_url and acc.fb_ig_account_id:
+                    r_fb = requests.get(
+                        f"https://graph.facebook.com/v22.0/{acc.fb_ig_account_id}",
+                        params={"fields": "profile_picture_url", "access_token": acc.fb_access_token},
+                        timeout=10
+                    )
+                    if r_fb.status_code == 200:
+                        pic_url = r_fb.json().get("profile_picture_url")
+            except Exception as e:
+                print(f"[ViralDog] Meta API avatar fetch notice (@{acc.username}): {e}")
+
+        # 2. Tentar obter via instagrapi caso haja sessão
+        if not pic_url and acc.session_cookies:
             try:
                 from backend_analytics import _init_instagrapi_client
                 cl = _init_instagrapi_client(acc)
@@ -48,7 +72,7 @@ def _download_and_save_avatar_job(account_id: int):
             except Exception as e:
                 print(f"Instagrapi avatar fetch notice (@{acc.username}): {e}")
 
-        # 2. Tentar obter via web profile info público
+        # 3. Tentar obter via web profile info público
         if not pic_url:
             try:
                 from backend_analytics import _fetch_public_profile_info
@@ -58,7 +82,7 @@ def _download_and_save_avatar_job(account_id: int):
             except Exception as e:
                 print(f"Public avatar fetch notice (@{acc.username}): {e}")
 
-        # 3. Se obteve a URL da imagem, baixar e gravar localmente
+        # 4. Se obteve a URL da imagem, baixar e gravar localmente
         if pic_url:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -74,6 +98,9 @@ def _download_and_save_avatar_job(account_id: int):
                 acc.avatar_url = f"/avatars/{filename}?t={timestamp}"
                 db.commit()
                 print(f"[ViralDog] Foto de perfil baixada com sucesso para @{acc.username}: {acc.avatar_url}")
+            elif r.status_code == 200 and pic_url.startswith("http"):
+                acc.avatar_url = pic_url
+                db.commit()
     except Exception as ex:
         print(f"Erro ao salvar avatar para conta {account_id}: {ex}")
     finally:
@@ -89,11 +116,23 @@ def list_accounts(request: Request, db: Session = Depends(get_db)):
     user = get_current_user(request, db)
     query = db.query(Account)
     if user:
-        query = query.filter(Account.owner_user_id == str(user.id))
+        query = query.filter(
+            (Account.owner_user_id == str(user.id)) | 
+            (Account.owner_user_id == "default") | 
+            (Account.owner_user_id == None) |
+            (Account.owner_user_id == "")
+        )
     else:
-        # Se requisição não autenticada no modo local
-        query = query.filter((Account.owner_user_id == "default") | (Account.owner_user_id == None))
+        # Se requisição no modo local/desktop sem JWT
+        query = query.filter(
+            (Account.owner_user_id == "default") | 
+            (Account.owner_user_id == None) |
+            (Account.owner_user_id != "")
+        )
     accounts = query.all()
+    for a in accounts:
+        if not a.avatar_url and (a.fb_access_token or a.session_cookies):
+            trigger_avatar_sync(a.id)
     return [{
         "id": a.id, "username": a.username, "status": a.status,
         "proxy_url": a.proxy_url, "notes": a.notes, "tags": a.tags,
@@ -103,13 +142,73 @@ def list_accounts(request: Request, db: Session = Depends(get_db)):
         "avatar_url": a.avatar_url,
         "auth_mode": a.auth_mode or "cookies",
         "last_opened_at": a.last_opened_at.isoformat() if a.last_opened_at else None,
-        "token_expires_at": a.token_expires_at.isoformat() if a.token_expires_at else None,
-        "fb_token_expires_at": a.fb_token_expires_at.isoformat() if a.fb_token_expires_at else None,
+        "token_expires_at": a.token_expires_at.isoformat() if getattr(a, 'token_expires_at', None) else None,
+        "fb_token_expires_at": getattr(a, 'fb_token_expires_at', getattr(a, 'token_expires_at', None)).isoformat() if (getattr(a, 'fb_token_expires_at', None) or getattr(a, 'token_expires_at', None)) else None,
         "has_session": bool(a.session_cookies),
         "has_official_token": bool(a.fb_access_token),
         "fb_ig_account_id": a.fb_ig_account_id,
+        "fingerprint_json": a.fingerprint_json,
+        "warmup_config_json": a.warmup_config_json,
+        "last_warmup_at": a.last_warmup_at.isoformat() if a.last_warmup_at else None,
+        "warmup_history_json": a.warmup_history_json,
+        "extensions_config_json": a.extensions_config_json,
         "created_at": a.created_at.isoformat() if a.created_at else None
     } for a in accounts]
+
+
+@router.post("")
+@router.post("/")
+def create_account(req: AccountCreate, request: Request, db: Session = Depends(get_db)):
+    user = get_current_user(request, db)
+    owner_user_id = str(user.id) if user else "default"
+
+    clean_user = req.username.replace("@", "").strip()
+    if not clean_user:
+        raise HTTPException(status_code=400, detail="Nome de usuário é obrigatório.")
+
+    acc = db.query(Account).filter(Account.owner_user_id == owner_user_id, Account.username == clean_user).first()
+    if acc:
+        if req.proxy_url is not None:
+            acc.proxy_url = req.proxy_url
+        if req.folder:
+            acc.folder = req.folder
+        if req.notes is not None:
+            acc.notes = req.notes
+        if req.tags is not None:
+            acc.tags = req.tags
+        if req.platform:
+            acc.platform = req.platform
+    else:
+        acc = Account(
+            username=clean_user,
+            display_name=clean_user,
+            proxy_url=req.proxy_url,
+            folder=req.folder or "Geral",
+            notes=req.notes,
+            tags=req.tags,
+            platform=req.platform or "instagram",
+            status="new",
+            owner_user_id=owner_user_id,
+            auth_mode="cookies",
+            created_at=datetime.utcnow()
+        )
+        db.add(acc)
+    db.commit()
+    db.refresh(acc)
+
+    trigger_avatar_sync(acc.id)
+
+    return {
+        "status": "success",
+        "id": acc.id,
+        "username": acc.username,
+        "display_name": acc.display_name,
+        "folder": acc.folder,
+        "proxy_url": acc.proxy_url,
+        "notes": acc.notes,
+        "tags": acc.tags,
+        "status": acc.status
+    }
 
 
 @router.post("/cookie")
@@ -190,6 +289,18 @@ def patch_account(account_id: int, req: AccountPatchRequest, request: Request, d
     if "fb_access_token" in update_data: acc.fb_access_token = req.fb_access_token
     if "fb_ig_account_id" in update_data: acc.fb_ig_account_id = req.fb_ig_account_id
     if "instagram_user_id" in update_data: acc.instagram_user_id = req.instagram_user_id
+    if "fingerprint_json" in update_data: acc.fingerprint_json = req.fingerprint_json
+    if "warmup_config_json" in update_data: acc.warmup_config_json = req.warmup_config_json
+    if "warmup_history_json" in update_data: acc.warmup_history_json = req.warmup_history_json
+    if "extensions_config_json" in update_data: acc.extensions_config_json = req.extensions_config_json
+    if "last_warmup_at" in update_data:
+        if req.last_warmup_at:
+            try:
+                acc.last_warmup_at = datetime.fromisoformat(req.last_warmup_at)
+            except Exception:
+                acc.last_warmup_at = datetime.utcnow()
+        else:
+            acc.last_warmup_at = None
     if "token_expires_at" in update_data:
         if req.token_expires_at:
             try:

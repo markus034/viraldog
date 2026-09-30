@@ -3,7 +3,7 @@
  * MultiLogin account. Google explicitly blocks account sign-in in embedded
  * browser frameworks, so authentication must happen in a supported browser.
  */
-const { app, ipcMain } = require('electron')
+const { app, ipcMain, screen } = require('electron')
 const { spawn } = require('child_process')
 const fs = require('fs')
 const path = require('path')
@@ -12,6 +12,7 @@ const GOOGLE_LOGIN_URL = 'https://accounts.google.com/ServiceLogin?continue=http
 const INSTAGRAM_LOGIN_URL = 'https://www.instagram.com/accounts/login/'
 const INSTAGRAM_LOGIN_TIMEOUT_MS = 10 * 60 * 1000
 const activeInstagramMonitors = new Map()
+const spawnedBrowserProcesses = new Set()
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))
 
@@ -71,17 +72,75 @@ function isGoogleAccountUrl(url) {
   }
 }
 
-function buildChromeArguments({ isolatedProfileDir, proxy, url, enableInstagramCapture = false }) {
+function getEnabledExtensionsForProfile(extensionsConfig = null) {
   const extensionPaths = []
-  const { app } = require('electron')
-  const extensionsDir = app && app.isPackaged
+  const builtinDir = app && app.isPackaged
     ? path.join(process.resourcesPath, 'extensions')
     : path.join(__dirname, 'extensions')
-  const cookieEditorDir = path.join(extensionsDir, 'cookie-editor')
 
-  if (fs.existsSync(cookieEditorDir)) {
-    extensionPaths.push(cookieEditorDir)
+  let userDataExtDir = null
+  try {
+    userDataExtDir = path.join(app.getPath('userData'), 'extensions')
+  } catch (e) {}
+
+  let perProfileConfig = {}
+  if (extensionsConfig) {
+    try {
+      perProfileConfig = typeof extensionsConfig === 'string' ? JSON.parse(extensionsConfig) : extensionsConfig
+    } catch (e) {}
   }
+
+  const scanDir = (dir) => {
+    if (!dir || !fs.existsSync(dir)) return
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          const extPath = path.join(dir, entry.name)
+          const manifestPath = path.join(extPath, 'manifest.json')
+          if (fs.existsSync(manifestPath)) {
+            const extId = entry.name
+            // Se foi desabilitado especificamente para este perfil
+            if (perProfileConfig && perProfileConfig[extId] === false) {
+              continue
+            }
+            extensionPaths.push(extPath)
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[ExternalBrowser] Erro ao escanear diretório de extensões:', dir, e.message)
+    }
+  }
+
+  scanDir(builtinDir)
+  if (userDataExtDir) scanDir(userDataExtDir)
+
+  return [...new Set(extensionPaths)]
+}
+
+function buildChromeArguments({
+  isolatedProfileDir,
+  proxy,
+  url,
+  enableInstagramCapture = false,
+  fingerprint = null,
+  extensionsConfig = null,
+  windowPosition = null,
+  windowSize = null,
+}) {
+  const extensionPaths = getEnabledExtensionsForProfile(extensionsConfig)
+
+  let fpObj = null
+  if (fingerprint) {
+    try {
+      fpObj = typeof fingerprint === 'string' ? JSON.parse(fingerprint) : fingerprint
+    } catch (e) {}
+  }
+
+  const lang = fpObj?.lang || 'pt-BR'
+  const windowWidth = windowSize?.width || fpObj?.windowWidth || 1280
+  const windowHeight = windowSize?.height || fpObj?.windowHeight || 800
 
   const args = [
     `--user-data-dir=${isolatedProfileDir}`,
@@ -90,8 +149,21 @@ function buildChromeArguments({ isolatedProfileDir, proxy, url, enableInstagramC
     '--no-default-browser-check',
     '--new-window',
     `--disk-cache-dir=${path.join(isolatedProfileDir, 'Cache')}`,
-    '--lang=pt-BR',
+    `--lang=${lang}`,
+    `--window-size=${Math.round(windowWidth)},${Math.round(windowHeight)}`,
+    '--disable-features=WebAuthentication,WebAuthenticationConditionalUI,WebAuthenticationResidentKeys,WebAuthenticationNewPasskeyUI,PasskeyManagement,WebAuthenticationClientCapabilities,WebAuthenticationHybridLink,WebAuthenticationPhoneSupport',
+    '--disable-webauthn',
+    '--disable-fido-u2f-request',
+    '--disable-web-security-for-fido',
   ]
+
+  if (windowPosition && windowPosition.x !== undefined && windowPosition.y !== undefined) {
+    args.push(`--window-position=${Math.round(windowPosition.x)},${Math.round(windowPosition.y)}`)
+  }
+
+  if (fpObj?.userAgent) {
+    args.push(`--user-agent=${fpObj.userAgent}`)
+  }
 
   if (extensionPaths.length > 0) {
     args.push(`--load-extension=${extensionPaths.join(',')}`)
@@ -146,7 +218,7 @@ function parseRawOrJsonCookies(cookiesInput) {
           name,
           value,
           url: 'https://www.instagram.com/',
-          domain: '.instagram.com',
+          domain,
           path: '/',
           secure: true,
           httpOnly: name === 'sessionid' || name === 'mid',
@@ -179,7 +251,17 @@ async function injectCookiesViaCdp(profileDir, sessionCookies, targetUrl) {
   }
 }
 
-function openExternalProfileBrowser({ profileKey, proxyUrl, url, sessionCookies, enableInstagramCapture = false }) {
+function openExternalProfileBrowser({
+  profileKey,
+  proxyUrl,
+  url,
+  sessionCookies,
+  enableInstagramCapture = false,
+  fingerprint = null,
+  extensionsConfig = null,
+  windowPosition = null,
+  windowSize = null,
+}) {
   const browserPath = findChromeExecutable()
   if (!browserPath) {
     return Promise.resolve({
@@ -201,6 +283,10 @@ function openExternalProfileBrowser({ profileKey, proxyUrl, url, sessionCookies,
     proxy,
     url: url || 'https://www.instagram.com/',
     enableInstagramCapture,
+    fingerprint,
+    extensionsConfig,
+    windowPosition,
+    windowSize,
   })
 
   return new Promise((resolve) => {
@@ -211,7 +297,13 @@ function openExternalProfileBrowser({ profileKey, proxyUrl, url, sessionCookies,
       windowsHide: false,
     })
 
+    spawnedBrowserProcesses.add(child)
+    child.on('exit', () => {
+      spawnedBrowserProcesses.delete(child)
+    })
+
     child.once('error', (error) => {
+      spawnedBrowserProcesses.delete(child)
       if (settled) return
       settled = true
       resolve({ success: false, error: error.message })
@@ -233,6 +325,120 @@ function openExternalProfileBrowser({ profileKey, proxyUrl, url, sessionCookies,
       })
     })
   })
+}
+
+function closeAllProfileBrowsers() {
+  let count = 0
+  for (const proc of spawnedBrowserProcesses) {
+    try {
+      if (proc.pid) {
+        if (process.platform === 'win32') {
+          spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { stdio: 'ignore' })
+        } else {
+          proc.kill('SIGTERM')
+        }
+        count++
+      }
+    } catch (e) {}
+  }
+  spawnedBrowserProcesses.clear()
+  return { success: true, count }
+}
+
+async function openMultipleProfileBrowsers({ accounts, layout = 'grid', syncUrl = null }) {
+  if (!accounts || !Array.isArray(accounts) || accounts.length === 0) {
+    return { success: false, error: 'Nenhuma conta informada.' }
+  }
+
+  let workArea = { x: 0, y: 0, width: 1920, height: 1040 }
+  try {
+    const primaryDisplay = screen.getPrimaryDisplay()
+    if (primaryDisplay && primaryDisplay.workArea) {
+      workArea = primaryDisplay.workArea
+    }
+  } catch (e) {
+    console.warn('[ExternalBrowser] Erro ao obter dimensões da tela:', e.message)
+  }
+
+  const N = accounts.length
+  let cols = 1
+  let rows = 1
+
+  if (layout === 'grid') {
+    if (N === 2) {
+      cols = 2
+      rows = 1
+    } else if (N === 3 || N === 4) {
+      cols = 2
+      rows = 2
+    } else if (N === 5 || N === 6) {
+      cols = 3
+      rows = 2
+    } else if (N > 6) {
+      cols = Math.ceil(Math.sqrt(N))
+      rows = Math.ceil(N / cols)
+    }
+  }
+
+  const cellWidth = Math.floor(workArea.width / cols)
+  const cellHeight = Math.floor(workArea.height / rows)
+
+  const results = []
+  for (let i = 0; i < accounts.length; i++) {
+    const acc = accounts[i]
+    let windowPosition = null
+    let windowSize = null
+
+    if (layout === 'grid') {
+      const col = i % cols
+      const row = Math.floor(i / cols)
+      windowPosition = {
+        x: workArea.x + (col * cellWidth),
+        y: workArea.y + (row * cellHeight),
+      }
+      windowSize = {
+        width: cellWidth,
+        height: cellHeight,
+      }
+    } else if (layout === 'cascade') {
+      const baseWidth = Math.floor(workArea.width * 0.7)
+      const baseHeight = Math.floor(workArea.height * 0.8)
+      const offset = 35
+      const maxOffsetCols = Math.max(1, Math.floor((workArea.width - baseWidth) / offset))
+      const maxOffsetRows = Math.max(1, Math.floor((workArea.height - baseHeight) / offset))
+      windowPosition = {
+        x: workArea.x + ((i % maxOffsetCols) * offset),
+        y: workArea.y + ((i % maxOffsetRows) * offset),
+      }
+      windowSize = {
+        width: baseWidth,
+        height: baseHeight,
+      }
+    }
+
+    const res = await openExternalProfileBrowser({
+      profileKey: acc.profile_key,
+      proxyUrl: acc.proxy,
+      url: syncUrl || acc.last_url || 'https://www.instagram.com/',
+      sessionCookies: acc.session_cookies,
+      fingerprint: acc.fingerprint_json,
+      extensionsConfig: acc.extensions_config_json,
+      windowPosition,
+      windowSize,
+    })
+    results.push(res)
+
+    if (i < accounts.length - 1) {
+      await delay(1200) // 1.2s delay between spawns
+    }
+  }
+
+  return {
+    success: true,
+    openedCount: results.filter((r) => r.success).length,
+    total: accounts.length,
+    results,
+  }
 }
 
 function createCdpClient(webSocketUrl) {
@@ -376,8 +582,6 @@ async function monitorInstagramLogin({ profileKey, profileDir, username, getMain
     const deadline = Date.now() + INSTAGRAM_LOGIN_TIMEOUT_MS
 
     while (!monitor.cancelled && Date.now() < deadline) {
-      // Solicita ao Chrome somente cookies aplicáveis ao Instagram. Cookies do
-      // Google e de outros sites não são lidos nem transferidos para o ViralDog.
       const result = await client.command('Network.getCookies', {
         urls: ['https://www.instagram.com/'],
       })
@@ -417,14 +621,22 @@ async function monitorInstagramLogin({ profileKey, profileDir, username, getMain
 }
 
 function registerExternalBrowserHandlers(getMainWindow) {
-  ipcMain.handle('open-external-profile-browser', async (_event, profileKey, proxyUrl, url, sessionCookies) => {
-    const result = await openExternalProfileBrowser({ profileKey, proxyUrl, url, sessionCookies })
+  ipcMain.handle('open-external-profile-browser', async (_event, profileKey, proxyUrl, url, sessionCookies, fingerprint, extensionsConfig) => {
+    const result = await openExternalProfileBrowser({ profileKey, proxyUrl, url, sessionCookies, fingerprint, extensionsConfig })
     return {
       success: result.success,
       browser: result.browser,
       error: result.error,
       requiresProxyAuthentication: result.requiresProxyAuthentication,
     }
+  })
+
+  ipcMain.handle('open-multiple-profile-browsers', async (_event, accounts, layout, syncUrl) => {
+    return await openMultipleProfileBrowsers({ accounts, layout, syncUrl })
+  })
+
+  ipcMain.handle('close-all-profile-browsers', async () => {
+    return closeAllProfileBrowsers()
   })
 
   ipcMain.handle('start-external-instagram-login', async (_event, profileKey, username, proxyUrl) => {
@@ -461,5 +673,7 @@ module.exports = {
   buildChromeArguments,
   isGoogleAccountUrl,
   openExternalProfileBrowser,
+  openMultipleProfileBrowsers,
+  closeAllProfileBrowsers,
   registerExternalBrowserHandlers,
 }

@@ -241,27 +241,34 @@ export default function CustomSelect({
         `}
       >
         <span className="flex items-center gap-2 min-w-0 flex-1">
-          {selectedOption?.avatar || selectedOption?.username ? (
+          {selectedOption?.dotColor ? (
+            <span
+              className="w-2.5 h-2.5 rounded-full shrink-0 shadow-2xs ring-1 ring-black/5"
+              style={{ backgroundColor: selectedOption.dotColor }}
+            />
+          ) : selectedOption?.avatar || selectedOption?.username ? (
             <CustomAvatar avatar={selectedOption.avatar} username={selectedOption.username || selectedOption.label} sizeClasses={avatarSize} textClasses="text-[9px]" />
+          ) : selectedOption?.isTag ? (
+            <span className="text-[14px] font-bold text-[#86868B] shrink-0 select-none">#</span>
           ) : (
             <>
               {(selectedOption?.icon || icon) && (
-                <span className="material-symbols-outlined text-[16px] text-text-secondary shrink-0">
+                <span className="material-symbols-outlined text-[16px] text-[#86868B] shrink-0">
                   {selectedOption?.icon || icon}
                 </span>
               )}
             </>
           )}
           <span
-            className={`truncate ${selectedOption ? 'text-text-primary' : 'text-text-secondary'}`}
+            className={`truncate ${selectedOption ? 'text-[#1D1D1F]' : 'text-[#86868B]'}`}
             style={selectedOption?.style || (selectedOption?.fontFamily ? { fontFamily: selectedOption.fontFamily } : {})}
           >
             {selectedOption ? selectedOption.label : placeholder}
           </span>
         </span>
         <span
-          className={`material-symbols-outlined text-[16px] text-text-secondary shrink-0 transition-transform duration-200 ${
-            isOpen ? 'rotate-180' : ''
+          className={`material-symbols-outlined text-[16px] text-[#86868B] shrink-0 transition-transform duration-200 ${
+            isOpen ? 'rotate-180 text-[#0071E3]' : ''
           }`}
         >
           expand_more
@@ -279,14 +286,13 @@ export default function CustomSelect({
             role="listbox"
             className={`
               custom-select-dropdown
-              absolute z-50 mt-1
+              absolute z-50 mt-1.5
               ${alignClasses}
-              bg-white border border-[#e8e8ea]/80
-              rounded-xl overflow-hidden
-              shadow-[0_10px_40px_rgba(0,0,0,0.12)]
-              max-h-[200px] overflow-y-auto
+              bg-white/95 backdrop-blur-md border border-[#E8E8ED]
+              rounded-2xl p-1.5
+              shadow-[0_16px_40px_rgba(0,0,0,0.12)]
+              max-h-[220px] overflow-y-auto
               custom-scrollbar
-              ${listSizeClasses}
             `}
             style={{ animation: 'selectDropIn 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards' }}
           >
@@ -296,47 +302,63 @@ export default function CustomSelect({
 
               return (
                 <div
-                  key={option.value}
+                  key={option.value || `opt-${index}`}
                   data-option
                   role="option"
                   aria-selected={isSelected}
                   onClick={() => handleSelect(option.value)}
                   onMouseEnter={() => setHighlightedIndex(index)}
                   className={`
-                    flex items-center justify-between gap-2
-                    ${itemSizeClasses}
+                    flex items-center justify-between gap-2.5
+                    px-3 py-2 rounded-xl text-xs
                     font-medium cursor-pointer
-                    transition-colors duration-100
-                    ${isHighlighted ? 'bg-[#F5F5F7]' : ''}
-                    ${isSelected ? 'text-[#0071E3]' : 'text-text-primary'}
+                    transition-all duration-150
+                    ${isHighlighted && !isSelected ? 'bg-[#F5F5F7]' : ''}
+                    ${isSelected ? 'bg-[#0071E3]/10 text-[#0071E3] font-bold' : 'text-[#1D1D1F]'}
                   `}
                 >
                   <span className="flex items-center gap-2.5 min-w-0 flex-1">
-                    {option.avatar || option.username ? (
-                      <CustomAvatar avatar={option.avatar} username={option.username || option.label} sizeClasses="w-6 h-6" textClasses="text-[9px]" />
+                    {option.dotColor ? (
+                      <span
+                        className="w-2.5 h-2.5 rounded-full shrink-0 shadow-2xs ring-1 ring-black/5"
+                        style={{ backgroundColor: option.dotColor }}
+                      />
+                    ) : option.avatar || option.username ? (
+                      <CustomAvatar avatar={option.avatar} username={option.username || option.label} sizeClasses="w-5.5 h-5.5" textClasses="text-[9px]" />
                     ) : (
-                      option.icon && (
-                        <span className={`material-symbols-outlined text-[16px] shrink-0 ${isSelected ? 'text-[#0071E3]' : 'text-text-secondary'}`}>
+                      !option.isTag && option.icon && (
+                        <span className={`material-symbols-outlined text-[16px] shrink-0 ${isSelected ? 'text-[#0071E3]' : 'text-[#86868B]'}`}>
                           {option.icon}
                         </span>
                       )
                     )}
-                    <span
-                      className="truncate"
-                      style={option.style || (option.fontFamily ? { fontFamily: option.fontFamily } : {})}
-                    >
-                      {option.label}
-                    </span>
+                    {option.isTag ? (
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className={`text-[13px] font-bold select-none ${isSelected ? 'text-[#0071E3]' : 'text-[#86868B]'}`}>
+                          #
+                        </span>
+                        <span className={`truncate text-xs ${isSelected ? 'text-[#0071E3] font-bold' : 'text-[#1D1D1F] font-semibold'}`}>
+                          {option.label}
+                        </span>
+                      </div>
+                    ) : (
+                      <span
+                        className="truncate"
+                        style={option.style || (option.fontFamily ? { fontFamily: option.fontFamily } : {})}
+                      >
+                        {option.label}
+                      </span>
+                    )}
                   </span>
                   {isSelected && (
-                    <span className="material-symbols-outlined text-[14px] text-[#0071E3] shrink-0">check</span>
+                    <span className="material-symbols-outlined text-[15px] text-[#0071E3] shrink-0 font-bold">check</span>
                   )}
                 </div>
               );
             })}
 
             {options.length === 0 && (
-              <div className={`${itemSizeClasses} text-text-secondary text-center italic`}>
+              <div className="px-3 py-2 text-xs text-[#86868B] text-center italic">
                 Nenhuma opção disponível
               </div>
             )}

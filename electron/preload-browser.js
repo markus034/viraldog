@@ -21,27 +21,64 @@ const {
 // no browser em vez de salvar na pasta configurada.
 contextBridge.exposeInMainWorld('electronAPI', {
   triggerDownload: (url, filename) => ipcRenderer.send('ig-browser-download-url', url, filename),
+  buildZipNative: (data) => ipcRenderer.invoke('ig-browser-build-zip-native', data),
 })
 
 // Content scripts run in an isolated JavaScript world. Listen for their
 // postMessage requests here as well, so downloads do not depend on the MAIN
 // world being able to see window.electronAPI.
-window.addEventListener('message', (event) => {
+window.addEventListener('message', async (event) => {
   if (event.source !== window) return
-  if (!event.data || event.data.type !== 'IG_SAVER_DOWNLOAD_REQUEST') return
-  if (!event.data.url) return
-  ipcRenderer.send(
-    'ig-browser-download-url',
-    event.data.url,
-    event.data.filename || ''
-  )
+  if (!event.data) return
+
+  if (event.data.type === 'IG_SAVER_DOWNLOAD_REQUEST') {
+    if (!event.data.url) return
+    ipcRenderer.send(
+      'ig-browser-download-url',
+      event.data.url,
+      event.data.filename || ''
+    )
+    return
+  }
+
+  if (event.data.type === 'IG_SAVER_BUILD_ZIP_REQUEST') {
+    const { requestId, username, items, filename, taskId, concurrency } = event.data
+    try {
+      const result = await ipcRenderer.invoke('ig-browser-build-zip-native', {
+        username,
+        items,
+        filename,
+        taskId,
+        concurrency
+      })
+      window.postMessage({
+        type: 'IG_SAVER_BUILD_ZIP_RESPONSE',
+        requestId,
+        result
+      }, '*')
+    } catch (err) {
+      window.postMessage({
+        type: 'IG_SAVER_BUILD_ZIP_RESPONSE',
+        requestId,
+        error: err.message || String(err)
+      }, '*')
+    }
+  }
 })
 
 // Keep the toolbar button in sync when the menu is closed inside Instagram.
 window.addEventListener('message', (event) => {
   if (event.source !== window || event.origin !== window.location.origin) return
-  if (!event.data || event.data.type !== 'VIRALDOG_IG_FAVORITES_MENU_CLOSED') return
-  ipcRenderer.send('ig-browser-favorites-menu-closed')
+  if (!event.data) return
+  if (event.data.type === 'VIRALDOG_IG_FAVORITES_MENU_CLOSED') {
+    ipcRenderer.send('ig-browser-favorites-menu-closed')
+  } else if (event.data.type === 'VIRALDOG_FAVORITE_TOGGLED') {
+    ipcRenderer.send('ig-browser-sync-favorite', {
+      platform: event.data.platform,
+      username: event.data.username,
+      active: event.data.active === true
+    })
+  }
 })
 
 const INSTAGRAM_RESERVED_ROUTES = new Set([
@@ -67,10 +104,27 @@ function profileFromDownloadButton(button) {
   return null
 }
 
+function profileFromTikTokPage() {
+  try {
+    const match = window.location.pathname.match(/\/@([A-Za-z0-9_.-]+)/)
+    if (match) return match[1]
+  } catch (e) {}
+  return null
+}
+
 // Capture the author before the extension starts resolving/downloading media.
 // This is a synchronous click hint used when Chromium drops profile/file from
 // the native DownloadItem and leaves only an opaque CDN basename.
 document.addEventListener('click', (event) => {
+  const ttButton = event.target?.closest?.(
+    '.dog-saver-tiktok-post-button, .dog-saver-tiktok-profile-download, #dog-saver-tiktok-start'
+  )
+  if (ttButton) {
+    const username = profileFromTikTokPage()
+    if (username) ipcRenderer.send('ig-browser-current-download-profile', username)
+    return
+  }
+
   const button = event.target?.closest?.(
     '#ig-saver-single-btn, #ig-saver-reels-btn, [data-ig-saver-post-btn] button, button[aria-label="Baixar esta publicação"], button[aria-label="Baixar este Reel"]'
   )
@@ -126,6 +180,31 @@ try {
   if (typeof window !== 'undefined') {
     delete window.process
     delete window.__electron_preload
+  }
+} catch (e) {}
+
+// ── 3.1. Desativar WebAuthn / Passkeys nativos (impede modal do Windows Hello / USB Key) ──
+try {
+  if (typeof window !== 'undefined') {
+    if (window.PublicKeyCredential) {
+      window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = () => Promise.resolve(false)
+      window.PublicKeyCredential.isConditionalMediationAvailable = () => Promise.resolve(false)
+    }
+    if (navigator.credentials) {
+      const origGet = navigator.credentials.get ? navigator.credentials.get.bind(navigator.credentials) : null
+      navigator.credentials.get = function (options) {
+        if (options && (options.publicKey || options.mediation === 'conditional')) {
+          return new Promise(() => {})
+        }
+        return origGet ? origGet(options) : Promise.resolve(null)
+      }
+      navigator.credentials.create = function (options) {
+        if (options && options.publicKey) {
+          return new Promise(() => {})
+        }
+        return Promise.resolve(null)
+      }
+    }
   }
 } catch (e) {}
 

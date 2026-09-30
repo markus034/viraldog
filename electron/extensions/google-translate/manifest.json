@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Google Tradutor",
+  "version": "2.0.1",
+  "description": "Tradução rápida de legendas e páginas de outros idiomas.",
+  "permissions": ["contextMenus"],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

@@ -15,4 +15,5 @@ moviepy>=2.0.0
 openai-whisper
 yt-dlp
 pyjwt
+boto3
 

@@ -63,12 +63,49 @@ if (typeof chrome !== 'undefined') {
               url: message.url,
               filename: message.filename || ''
             }, '*');
-            console.log("[Polyfill] Download request forwarded via postMessage bridge");
+            
+            let a = document.createElement('a');
+            a.href = message.url;
+            a.download = (message.filename || '').split(/[\/\\]/).pop() || 'instagram_media';
+            a.target = '_blank';
+            a.rel = 'noreferrer';
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => a.remove(), 1000);
+
             sendResponse({ success: true });
           } catch (err) {
             console.error("[Polyfill] Download forward failed:", err);
             sendResponse({ error: err.message });
           }
+          return true;
+        }
+
+        if (message && message.type === "POLYFILL_TRIGGER_BUILD_ZIP") {
+          console.log("[Polyfill] Received POLYFILL_TRIGGER_BUILD_ZIP:", message.username, "items:", message.items?.length);
+          const requestId = 'zip_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+          const onZipResponse = (event) => {
+            if (event.source !== window || !event.data || event.data.type !== 'IG_SAVER_BUILD_ZIP_RESPONSE' || event.data.requestId !== requestId) return;
+            window.removeEventListener('message', onZipResponse);
+            if (event.data.error) {
+              console.error("[Polyfill] ZIP build failed:", event.data.error);
+              sendResponse({ error: event.data.error, downloaded: 0, failed: message.items?.length || 1 });
+            } else {
+              console.log("[Polyfill] ZIP build succeeded:", event.data.result);
+              sendResponse(event.data.result || { downloaded: message.items?.length || 0, failed: 0 });
+            }
+          };
+          window.addEventListener('message', onZipResponse);
+          window.postMessage({
+            type: 'IG_SAVER_BUILD_ZIP_REQUEST',
+            requestId,
+            username: message.username,
+            items: message.items,
+            filename: message.filename,
+            taskId: message.taskId,
+            concurrency: message.concurrency
+          }, '*');
           return true;
         }
       });
@@ -77,7 +114,7 @@ if (typeof chrome !== 'undefined') {
 }
 "use strict";
 (() => {
-  function relaySingleMediaToElectron(username, postId, media) {
+  async function relaySingleMediaToElectron(username, postId, media) {
     let extension = media?.type === "video" ? "mp4" : "jpg";
     try {
       let match = new URL(media.url).pathname.match(/\.(\w+)$/);
@@ -95,10 +132,41 @@ if (typeof chrome !== 'undefined') {
       url: media.url,
       filename,
     }, "*");
-    return Promise.resolve({ success: !0 });
+
+    try {
+      let res = await w({
+        type: "DOWNLOAD_SINGLE_MEDIA",
+        payload: {
+          username: safeUsername,
+          postId: safePostId,
+          media,
+          filename
+        }
+      });
+      if (res?.error) {
+        return { error: res.error };
+      }
+      return { success: !0 };
+    } catch (err) {
+      console.warn("[IG-Saver] Background single download error, attempting fallback:", err);
+      try {
+        let res2 = await w({
+          type: "DOWNLOAD_EXPLORE_ITEMS",
+          payload: {
+            postId: safePostId,
+            username: safeUsername,
+            items: [media]
+          }
+        });
+        if (res2?.error) return { error: res2.error };
+        return { success: !0 };
+      } catch (err2) {
+        return { error: err2.message || err.message };
+      }
+    }
   }
 
-  var ft = { concurrency: 3, maxRetries: 2, zipChunkSize: 1e3 };
+  var ft = { concurrency: 3, maxRetries: 2, zipChunkSize: 0 };
   function selectVideoUrl(versions, fallbackUrl) {
     if (Array.isArray(versions) && versions.length > 0) {
       let sorted = [...versions].sort((a, b) => {
@@ -412,7 +480,7 @@ and click the "Download All" button`,
       "You've been using Dog Saver since v{version}. Pro is permanently unlocked \u2014 no payment needed. If this tool has helped you, a quick review helps us keep it free.",
     legacy_thanks_btn_review: "Leave a review",
     legacy_thanks_btn_done: "Got it",
-    dialog_filter_title: "Content Filters (Optional)",
+    dialog_filter_title: "Filters",
     dialog_filter_hashtag: "Hashtag or Keyword",
     dialog_filter_likes: "Min Likes",
     dialog_filter_views: "Min Views (Videos)",
@@ -2205,7 +2273,7 @@ e clique no bot\xE3o "Baixar tudo"`,
       "Voc\xEA usa o Dog Saver desde v{version}. O Pro est\xE1 permanentemente desbloqueado \u2014 sem pagamento. Se esta ferramenta te ajudou, uma avalia\xE7\xE3o r\xE1pida nos ajuda a mant\xEA-la gratuita.",
     legacy_thanks_btn_review: "Deixar uma avalia\xE7\xE3o",
     legacy_thanks_btn_done: "Entendido",
-    dialog_filter_title: "Filtros de Conte\xFAdo (Opcional)",
+    dialog_filter_title: "Filtros",
     dialog_filter_hashtag: "Hashtag ou Palavra-chave",
     dialog_filter_likes: "M\xEDnimo de Curtidas",
     dialog_filter_views: "M\xEDnimo de Visualiza\xE7\xF5es",
@@ -2218,7 +2286,7 @@ e clique no bot\xE3o "Baixar tudo"`,
     dialog_estimate_unknown: "Depende do total de posts",
     dialog_sec_what: "O que baixar",
     dialog_sec_how: "Como salvar",
-    dialog_sec_filters: "Filtros de Conteúdo",
+    dialog_sec_filters: "Filtros de Texto",
     dialog_clean_filters: "Limpar Filtros",
     dialog_only_new: "Baixar apenas novos posts desde o último download",
     dialog_only_new_date: "Só novos desde {date}",
@@ -5100,12 +5168,21 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         return e.items.map((n) => ({ node: n.media }));
       if (Array.isArray(e?.items) && e.items.length > 0)
         return e.items.map((n) => ({ node: n }));
+      let clipsConn = e?.data?.xdt_api__v1__clips__user__connection_v2 || e?.data?.xdt_api__v1__clips__user__connection;
+      if (clipsConn?.edges && Array.isArray(clipsConn.edges)) return clipsConn.edges;
       let t = e?.data?.xdt_api__v1__feed__user_timeline_graphql_connection;
       return t && Array.isArray(t.edges)
         ? t.edges
         : e?.data?.user?.edge_owner_to_timeline_media?.edges || [];
     }
     extractPageInfo(e) {
+      let clipsConn = e?.data?.xdt_api__v1__clips__user__connection_v2 || e?.data?.xdt_api__v1__clips__user__connection;
+      if (clipsConn?.page_info) {
+        return {
+          hasNextPage: clipsConn.page_info.has_next_page ?? false,
+          endCursor: clipsConn.page_info.end_cursor || null
+        };
+      }
       if (e?.paging_info)
         return {
           hasNextPage: e.paging_info.more_available ?? !1,
@@ -5129,35 +5206,43 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       };
     }
     normalizeNode(e) {
-      if (e.shortcode != null || e.taken_at_timestamp != null) return e;
+      if (!e || typeof e !== "object") return e;
+      let isAlreadyGraphQL = (e.shortcode != null || e.taken_at_timestamp != null) && (e.display_url != null || e.video_url != null || e.edge_sidecar_to_children != null);
+      if (isAlreadyGraphQL) return e;
       let n =
           { 1: "GraphImage", 2: "GraphVideo", 8: "GraphSidecar" }[
             e.media_type
-          ] || "GraphImage",
+          ] || e.__typename || "GraphImage",
         a = {
-          shortcode: e.code ?? e.pk?.toString(),
-          id: e.pk?.toString(),
+          shortcode: e.code ?? e.shortcode ?? e.pk?.toString(),
+          id: e.pk?.toString() ?? e.id?.toString(),
           __typename: n,
-          is_video: e.media_type === 2,
-          taken_at_timestamp: e.taken_at ?? e.taken_at_timestamp ?? 0,
+          is_video: e.media_type === 2 || e.is_video === true,
+          taken_at_timestamp: e.taken_at ?? e.taken_at_timestamp ?? e.timestamp ?? 0,
         },
         o = e.image_versions2?.candidates;
       o?.length && (a.display_url = o[0].url);
+      if (!a.display_url && e.display_url) a.display_url = e.display_url;
       let r = e.video_versions;
-      return (
-        Array.isArray(r) && r.length && (a.video_url = selectVideoUrl(r, e.video_url)),
-        e.carousel_media?.length &&
-          (a.edge_sidecar_to_children = {
-            edges: e.carousel_media.map((s) => ({
-              node: {
-                display_url: s.image_versions2?.candidates?.[0]?.url,
-                is_video: s.media_type === 2,
-                video_url: selectVideoUrl(s.video_versions, s.video_url),
-              },
-            })),
-          }),
-        a
-      );
+      if (Array.isArray(r) && r.length) {
+        a.video_url = selectVideoUrl(r, e.video_url);
+      } else if (e.video_url) {
+        a.video_url = e.video_url;
+      }
+      if (e.carousel_media?.length) {
+        a.edge_sidecar_to_children = {
+          edges: e.carousel_media.map((s) => ({
+            node: {
+              display_url: s.image_versions2?.candidates?.[0]?.url || s.display_url,
+              is_video: s.media_type === 2 || s.is_video === true,
+              video_url: selectVideoUrl(s.video_versions, s.video_url),
+            },
+          })),
+        };
+      } else if (e.edge_sidecar_to_children) {
+        a.edge_sidecar_to_children = e.edge_sidecar_to_children;
+      }
+      return a;
     }
     parsePostNode(e) {
       let t = this.normalizeNode(e),
@@ -6056,11 +6141,15 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
   function oe(i) {
     let e = {
         "X-IG-App-ID": ca,
+        "X-ASBD-ID": "129477",
         "X-Requested-With": "XMLHttpRequest",
-        Referer: i,
+        Referer: i || window.location.href,
       },
       t = document.cookie.match(/csrftoken=([^;]+)/);
-    return (t && (e["X-CSRFToken"] = t[1].trim()), e);
+    if (t) e["X-CSRFToken"] = t[1].trim();
+    let c = document.cookie.match(/ds_user_id=([^;]+)/);
+    if (c) e["X-IG-WWW-Claim"] = "0";
+    return e;
   }
   var N = class {
     username;
@@ -6069,41 +6158,166 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     }
     async getUserId(e) {
       try {
-        let t = await fetch(
-          `https://www.instagram.com/api/v1/users/web_profile_info/?username=${e}`,
+        let res = await resolveProfileUserInfo(e);
+        if (res && res.userId) return String(res.userId);
+      } catch {}
+      let clean = String(e || this.username || "").toLowerCase().replace(/^@+/, "");
+      // 1. Script tags direct scan
+      try {
+        let scripts = document.querySelectorAll('script[type="application/json"]');
+        for (let s of scripts) {
+          let text = s.textContent || "";
+          if (text.includes(clean)) {
+            let m1 = text.match(new RegExp(`"username"\\s*:\\s*"${clean}"[^}]*"(?:pk|id|user_id|pk_id)"\\s*:\\s*"?(\\d+)"?`, "i"));
+            if (m1) return m1[1];
+            let m2 = text.match(new RegExp(`"(?:pk|id|user_id|pk_id)"\\s*:\\s*"?(\\d+)"?[^}]*"username"\\s*:\\s*"${clean}"`, "i"));
+            if (m2) return m2[1];
+            let m3 = text.match(/"target_user_id"\s*:\s*"?(\d+)"?/);
+            if (m3) return m3[1];
+            let m4 = text.match(/"reel_id"\s*:\s*"?(\\d+)"?/);
+            if (m4 && !m4[1].includes("highlight")) return m4[1];
+          }
+        }
+      } catch {}
+      // 2. Topsearch API
+      try {
+        let sRes = await fetch(
+          `https://www.instagram.com/api/v1/web/search/topsearch/?context=blended&query=${encodeURIComponent(clean)}`,
           {
             credentials: "include",
-            headers: oe(`https://www.instagram.com/${e}/`),
+            headers: oe(`https://www.instagram.com/${clean}/`),
           },
         );
-        if (!t.ok) return null;
-        let n = await P(t);
-        return n?.data?.user?.id ?? n?.data?.user?.pk ?? null;
-      } catch {
-        return null;
-      }
-    }
-    async fetchUserStories(e) {
+        if (sRes.ok) {
+          let sJson = await P(sRes);
+          let users = sJson?.users || [];
+          let exact = users.find(u => u?.user?.username?.toLowerCase() === clean) || users[0];
+          if (exact?.user?.pk || exact?.user?.id) {
+            return String(exact.user.pk || exact.user.id);
+          }
+        }
+      } catch {}
+      // 3. Web Profile Info API with full headers
       try {
         let t = await fetch(
-          `https://www.instagram.com/api/v1/feed/user/${e}/story/`,
+          `https://www.instagram.com/api/v1/users/web_profile_info/?username=${clean}`,
           {
             credentials: "include",
-            headers: oe(`https://www.instagram.com/${this.username}/`),
+            headers: oe(`https://www.instagram.com/${clean}/`),
           },
         );
-        if (!t.ok) return [];
-        let a = (await P(t))?.reel?.items;
-        return Array.isArray(a)
-          ? a
-              .map((o, r) => this.parseStoryItem(o, this.username, r))
-              .filter((o) => o.url)
-          : [];
-      } catch {
-        return [];
+        if (t.ok) {
+          let n = await P(t);
+          let uid = n?.data?.user?.id ?? n?.data?.user?.pk ?? null;
+          if (uid) return String(uid);
+        }
+      } catch {}
+      // 4. Query __a=1 fallback
+      try {
+        let t = await fetch(
+          `https://www.instagram.com/${clean}/?__a=1&__d=dis`,
+          {
+            credentials: "include",
+            headers: oe(`https://www.instagram.com/${clean}/`),
+          },
+        );
+        if (t.ok) {
+          let n = await P(t);
+          let uid = n?.graphql?.user?.id ?? n?.data?.user?.id ?? n?.data?.user?.pk ?? null;
+          if (uid) return String(uid);
+        }
+      } catch {}
+      return null;
+    }
+    async fetchUserStories(e) {
+      let targetId = e || this.username;
+
+      // 1. Extração de stories interceptados no MAIN world (imediato da memória)
+      try {
+        let intercepted = await requestInterceptedStories(this.username);
+        if (Array.isArray(intercepted) && intercepted.length > 0) {
+          let parsed = intercepted
+            .map((o, r) => this.parseStoryItem(o?.node || o, this.username, r, "story"))
+            .filter((o) => o.url);
+          if (parsed.length > 0) return parsed;
+        }
+      } catch {}
+
+      // 2. Extração direta dos scripts da página atual (imediato do DOM)
+      try {
+        let scriptStories = extractStoriesFromPageScripts(this.username);
+        if (scriptStories && scriptStories.length > 0) return scriptStories;
+      } catch {}
+
+      // 3. Requisições às APIs REST / GraphQL com timeout rápido para evitar bloqueio
+      let attempts = [
+        `https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=${encodeURIComponent(targetId)}`,
+        `https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=${encodeURIComponent(this.username)}`,
+        `https://www.instagram.com/api/v1/feed/user/${encodeURIComponent(targetId)}/story/`,
+        `https://www.instagram.com/graphql/query/?query_hash=de8017ee0a7c9c45ec4260733d81ea31&variables=${encodeURIComponent(JSON.stringify({ reel_ids: [String(targetId), String(this.username)], tag_names: [], location_ids: [], highlight_reel_ids: [], precomposed_overlay: false, show_story_viewer_list: true, story_viewer_fetch_count: 50, story_viewer_cursor: "" }))}`
+      ];
+
+      for (let url of attempts) {
+        try {
+          let controller = new AbortController();
+          let timer = setTimeout(() => controller.abort(), 3000);
+          let t = await fetch(url, {
+            credentials: "include",
+            headers: oe(`https://www.instagram.com/${this.username}/`),
+            signal: controller.signal
+          });
+          clearTimeout(timer);
+          if (t.ok) {
+            let res = await P(t);
+            let reels = res?.reels || res?.data?.reels || {};
+            let reel = reels[targetId] || reels[this.username] || (Array.isArray(res?.reels_media) ? res.reels_media.find(r => String(r.id) === String(targetId) || String(r.user?.pk) === String(targetId)) || res.reels_media[0] : null) || res?.reel;
+            let items = reel?.items;
+            if (Array.isArray(items) && items.length > 0) {
+              let parsed = items
+                .map((o, r) => this.parseStoryItem(o, this.username, r, "story"))
+                .filter((o) => o.url);
+              if (parsed.length > 0) return parsed;
+            }
+          }
+        } catch (err) {
+          console.warn("[Dog Saver] fetchUserStories attempt failed:", err?.message || err);
+        }
       }
+
+      return [];
     }
     async fetchHighlightsTray(e) {
+      let results = [];
+
+      // 1. Extração direta via DOM das bolhas de destaques da página
+      try {
+        let highlightLinks = document.querySelectorAll('a[href*="/stories/highlights/"]');
+        for (let a of highlightLinks) {
+          let href = a.getAttribute("href") || "";
+          let match = href.match(/\/stories\/highlights\/(\d+)/);
+          if (match) {
+            let id = match[1];
+            let title = "";
+            let titleEl = a.querySelector('img[alt]') || a.querySelector('div[dir="auto"]') || a.querySelector('span');
+            if (titleEl) {
+              title = titleEl.getAttribute("alt") || titleEl.textContent || "";
+            }
+            if (!title) title = a.textContent.trim();
+            if (!title) title = "Destaque";
+            if (!results.some(r => r.id === id)) {
+              results.push({ id, title: title.trim() });
+            }
+          }
+        }
+      } catch (domErr) {
+        console.warn("[Dog Saver] Erro na extração DOM de destaques:", domErr);
+      }
+
+      if (results.length > 0) {
+        return results;
+      }
+
+      // 2. Extração via API REST oficial do Instagram
       try {
         let t = await fetch(
           `https://www.instagram.com/api/v1/highlights/${e}/highlights_tray/`,
@@ -6112,19 +6326,73 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
             headers: oe(`https://www.instagram.com/${this.username}/`),
           },
         );
-        if (!t.ok) return [];
-        let a = (await P(t))?.tray;
-        return Array.isArray(a)
-          ? a
-              .map((o) => ({
-                id: typeof o?.id == "string" ? o.id : "",
-                title: typeof o?.title == "string" ? o.title.trim() : "",
-              }))
-              .filter((o) => o.id.length > 0)
-          : [];
-      } catch {
-        return [];
+        if (t.ok) {
+          let a = (await P(t))?.tray;
+          if (Array.isArray(a)) {
+            for (let o of a) {
+              let id = typeof o?.id === "string" ? o.id.replace(/^highlight:/, "") : String(o?.id || "");
+              let title = typeof o?.title === "string" ? o.title.trim() : "Destaque";
+              if (id && !results.some(r => r.id === id)) {
+                results.push({ id, title });
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("[Dog Saver] Erro na API de destaques tray:", err);
       }
+
+      return results;
+    }
+    async fetchHighlightReelItems(highlightId) {
+      let rawId = String(highlightId).replace(/^highlight:/, "");
+      let formattedId = `highlight:${rawId}`;
+
+      // 1. Tentar com prefixo highlight:
+      try {
+        let t = await fetch(
+          `https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=${encodeURIComponent(formattedId)}`,
+          {
+            credentials: "include",
+            headers: oe(`https://www.instagram.com/${this.username}/`),
+          },
+        );
+        if (t.ok) {
+          let res = await P(t);
+          let reel = res?.reels?.[formattedId] || res?.reels?.[rawId] || (Array.isArray(res?.reels_media) ? res.reels_media[0] : null);
+          if (reel && Array.isArray(reel.items) && reel.items.length > 0) {
+            let title = reel.title || "";
+            let items = reel.items.map((it, idx) => this.parseStoryItem(it, this.username, idx, "highlight")).filter(it => it.url);
+            return { title, items };
+          }
+        }
+      } catch (err) {
+        console.warn(`[Dog Saver] Erro ao buscar destaque ${rawId}:`, err);
+      }
+
+      // 2. Fallback sem prefixo
+      try {
+        let t2 = await fetch(
+          `https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=${encodeURIComponent(rawId)}`,
+          {
+            credentials: "include",
+            headers: oe(`https://www.instagram.com/${this.username}/`),
+          },
+        );
+        if (t2.ok) {
+          let res2 = await P(t2);
+          let reel2 = res2?.reels?.[rawId] || res2?.reels?.[formattedId] || (Array.isArray(res2?.reels_media) ? res2.reels_media[0] : null);
+          if (reel2 && Array.isArray(reel2.items) && reel2.items.length > 0) {
+            let title2 = reel2.title || "";
+            let items2 = reel2.items.map((it, idx) => this.parseStoryItem(it, this.username, idx, "highlight")).filter(it => it.url);
+            return { title: title2, items: items2 };
+          }
+        }
+      } catch (err2) {
+        console.warn(`[Dog Saver] Erro no fallback do destaque ${rawId}:`, err2);
+      }
+
+      return { title: "", items: [] };
     }
     async fetchHighlightItemsBatch(e) {
       let t = new Map();
@@ -6168,34 +6436,8 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       }
     }
     async fetchHighlightItems(e) {
-      try {
-        let t = e.startsWith("highlight:") ? e : `highlight:${e}`,
-          n = await fetch(
-            `https://www.instagram.com/api/v1/feed/reels_media/?reel_ids=${t}`,
-            {
-              credentials: "include",
-              headers: oe(`https://www.instagram.com/${this.username}/`),
-            },
-          );
-        if (!n.ok) return { title: "", username: this.username, items: [] };
-        let a = await P(n),
-          o = null;
-        if (
-          (a?.reels
-            ? (o = a.reels[t] ?? Object.values(a.reels)[0])
-            : a?.reels_media?.[0] && (o = a.reels_media[0]),
-          !o)
-        )
-          return { title: "", username: this.username, items: [] };
-        let r = o.user?.username ?? this.username,
-          s = typeof o.title == "string" ? o.title.trim() : "",
-          d = (Array.isArray(o.items) ? o.items : [])
-            .map((c, u) => this.parseStoryItem(c, r, u, "highlight"))
-            .filter((c) => c.url);
-        return { title: s, username: r, items: d };
-      } catch {
-        return { title: "", username: this.username, items: [] };
-      }
+      let res = await this.fetchHighlightReelItems(e);
+      return { title: res.title, username: this.username, items: res.items };
     }
     parseStoryItem(e, t, n, a = "story") {
       let o = e.media_type === 2 ? "video" : "image",
@@ -6206,13 +6448,14 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       }
       r || (r = e.image_versions2?.candidates?.[0]?.url ?? "");
       let s = e.pk ?? e.id ?? `${Date.now()}_${n}`;
+      let itemCreator = e.user?.username || t;
       return {
         postId: `${a}_${s}`,
         index: n,
         type: o,
         url: r,
         timestamp: e.taken_at ?? Math.floor(Date.now() / 1e3),
-        creator: t,
+        creator: itemCreator,
       };
     }
   };
@@ -6225,8 +6468,9 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     );
   }
   function Gt(i) {
-    if (!(i instanceof Error)) return !1;
-    let e = i.message;
+    if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.id) return true;
+    if (!i) return false;
+    let e = String(i?.message || i);
     return (
       e.includes("Extension context invalidated") ||
       e.includes("context invalidated")
@@ -6481,94 +6725,28 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     Y = 30;
   var Vt = 3;
   async function ba() {
-    let i = await chrome.storage.local.get([
-      b.legacyUser,
-      b.license,
-      b.activationId,
-      b.statusCache,
-      b.lastValidatedAt,
-    ]);
     return {
-      legacy: i[b.legacyUser] === !0,
-      license: typeof i[b.license] == "string" ? i[b.license] : null,
-      activationId:
-        typeof i[b.activationId] == "string" ? i[b.activationId] : null,
-      cache: i[b.statusCache] ?? null,
-      lastValidatedAt:
-        typeof i[b.lastValidatedAt] == "number" ? i[b.lastValidatedAt] : null,
+      legacy: true,
+      license: "PRO-VITALICIO",
+      activationId: "unlimited",
+      cache: { kind: "pro", expiresAt: null },
+      lastValidatedAt: Date.now(),
     };
   }
   async function xe(i = {}, e) {
-    return { kind: "legacy" };
+    return { kind: "pro", expiresAt: null };
   }
   function Se(i) {
-    return !0;
+    return true;
   }
   async function wa(i, e) {
-    let t = Wt(e),
-      a = (await chrome.storage.sync.get(t))[t];
-    if (!a || a.licenseKey !== i || !a.activationId) return null;
-    try {
-      let o = await Ue(i, ke, a.activationId);
-      return o.valid
-        ? (await chrome.storage.local.set({
-            [b.license]: i,
-            [b.activationId]: a.activationId,
-            [b.deviceFp]: e,
-            [b.statusCache]: { kind: "pro", expiresAt: o.expiresAt },
-            [b.lastValidatedAt]: Date.now(),
-          }),
-          { ok: !0 })
-        : null;
-    } catch {
-      return null;
-    }
+    return { ok: true };
   }
   async function Kt(i) {
-    let e = i.trim();
-    if (!e)
-      return {
-        ok: !1,
-        reason: "invalid_key",
-        error: "License key is required",
-      };
-    let t = await Ut(),
-      n = await wa(e, t);
-    if (n) return n;
-    let a;
-    try {
-      a = await Zt(e, ke, t);
-    } catch (o) {
-      return { ok: !1, reason: "network", error: o.message };
-    }
-    return !a.activated || !a.activationId
-      ? {
-          ok: !1,
-          reason:
-            a.error === "limit_reached"
-              ? "limit_reached"
-              : a.error === "invalid_key"
-                ? "invalid_key"
-                : "unknown",
-          error: a.error ?? "License activation failed",
-        }
-      : (await chrome.storage.local.set({
-          [b.license]: e,
-          [b.activationId]: a.activationId,
-          [b.deviceFp]: t,
-          [b.statusCache]: { kind: "pro", expiresAt: a.expiresAt },
-          [b.lastValidatedAt]: Date.now(),
-        }),
-        await chrome.storage.sync.set({
-          [Wt(t)]: { licenseKey: e, activationId: a.activationId },
-        }),
-        { ok: !0 });
+    return { ok: true };
   }
   async function jt() {
-    let e = (await chrome.storage.local.get(b.bulkAllTrialUsed))[
-      b.bulkAllTrialUsed
-    ];
-    return typeof e == "number" && e >= 0 ? e : 0;
+    return 0;
   }
   function ka(i) {
     switch (i) {
@@ -6944,13 +7122,88 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     return i === z ? _("parse_html_error") : i;
   }
   var Xt = !1;
-  async function w(i) {
+  let keepAlivePort = null;
+  function setupKeepAlive() {
     try {
-      return await chrome.runtime.sendMessage(i);
-    } catch (e) {
-      throw (Gt(e) && Pa(), e);
+      if (typeof chrome === "undefined" || !chrome.runtime?.connect) return;
+      if (keepAlivePort) {
+        try { keepAlivePort.disconnect(); } catch {}
+      }
+      keepAlivePort = chrome.runtime.connect({ name: "ig-saver-keepalive" });
+      keepAlivePort.onDisconnect.addListener(() => {
+        keepAlivePort = null;
+        setTimeout(setupKeepAlive, 1500);
+      });
+    } catch {}
+  }
+
+  try {
+    setupKeepAlive();
+    setInterval(() => {
+      if (keepAlivePort) {
+        try {
+          keepAlivePort.postMessage("ping");
+        } catch {
+          setupKeepAlive();
+        }
+      } else {
+        setupKeepAlive();
+      }
+    }, 20000);
+  } catch {}
+
+  async function w(i, retries = 3) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.id) {
+          Pa();
+          throw new Error("Extension context invalidated");
+        }
+        return await new Promise((resolve, reject) => {
+          let done = false;
+          let timer = setTimeout(() => {
+            if (!done) {
+              done = true;
+              reject(new Error('TIMEOUT_EXTENSION_MESSAGE'));
+            }
+          }, 20000);
+          try {
+            chrome.runtime.sendMessage(i, (response) => {
+              if (done) return;
+              done = true;
+              clearTimeout(timer);
+              let lastErr = chrome.runtime.lastError;
+              if (lastErr) {
+                reject(new Error(lastErr.message || 'RUNTIME_ERROR'));
+              } else {
+                resolve(response);
+              }
+            });
+          } catch (sendErr) {
+            if (!done) {
+              done = true;
+              clearTimeout(timer);
+              reject(sendErr);
+            }
+          }
+        });
+      } catch (e) {
+        let isContextDead = Gt(e);
+        if (isContextDead) {
+          Pa();
+          throw e;
+        }
+        if (attempt < retries) {
+          setupKeepAlive();
+          await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+          continue;
+        }
+        console.warn("[ig-saver] Message non-fatal timeout or transient error:", i?.type || i, e?.message || e);
+        return { error: e?.message || 'TRANSIENT_ERROR' };
+      }
     }
   }
+
   function Pa() {
     if (Xt) return;
     Xt = !0;
@@ -6958,14 +7211,15 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     ((i.id = "ig-saver-reload-banner"),
       (i.style.cssText = `
     position: fixed; top: 0; left: 0; right: 0; z-index: 2147483647;
-    background: #ed4956; color: #fff; text-align: center;
-    padding: 10px 16px; font-size: 14px; font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    display: flex; align-items: center; justify-content: center; gap: 12px;
+    background: linear-gradient(135deg, #EF4444, #DC2626); color: #fff; text-align: center;
+    padding: 10px 16px; font-size: 14px; font-weight: 500; font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    display: flex; align-items: center; justify-content: center; gap: 14px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.25);
   `),
       (i.innerHTML = `
-    <span>Dog Saver: Extension updated \u2014 please reload this page.</span>
-    <button style="background:#fff;color:#ed4956;border:none;border-radius:6px;padding:4px 14px;
-      font-size:13px;font-weight:600;cursor:pointer;">Reload</button>
+    <span>ViralDog: Conexão com a extensão reiniciada \u2014 recarregue esta página para continuar.</span>
+    <button style="background:#fff;color:#dc2626;border:none;border-radius:6px;padding:5px 16px;
+      font-size:13px;font-weight:700;cursor:pointer;box-shadow:0 2px 5px rgba(0,0,0,0.15);">Recarregar Página</button>
   `),
       i
         .querySelector("button")
@@ -7023,7 +7277,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       let tasksRes = await w({ type: "GET_TASKS" });
       let activeTask = tasksRes?.tasks?.find(t => t.status === "running" || t.status === "paused");
       if (activeTask) {
-        he(activeTask.taskId, activeTask.username);
+        he(activeTask.taskId, activeTask.username, activeTask.profilePicUrl);
       }
     } catch {}
   }
@@ -7134,29 +7388,98 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     } catch {}
     return "unknown";
   }
-  function dt() {
-    let i = document.querySelector("header");
-    if (!i) return null;
-    let e = i.querySelector('section button:not([id^="ig-saver"])');
-    if (!e) return null;
-    let t = e.parentElement;
-    for (
-      let n = 0;
-      t &&
-      t !== i &&
-      n < 6 &&
-      !(
-        t.tagName === "SECTION" ||
-        window.getComputedStyle(t).display === "block"
-      );
-      n++
-    ) {
-      let o = t.querySelector('div[role="button"] svg');
-      if (o) {
-        let r = o.closest('div[role="button"]');
-        if (r) return { container: t, similarBtn: r };
+  function findUsernameRow() {
+    let header = document.querySelector("header") || document.querySelector("main header");
+    if (!header) return null;
+    let username = String(O() || "").toLowerCase().replace(/^@+/, "");
+
+    let section = header.querySelector("section") || header;
+
+    // 1. Find heading element by text matching username or first h2/h1
+    let candidates = Array.from(section.querySelectorAll("h1, h2, h3, [role='heading'], span, a, div"));
+    let userHeading = candidates.find((el) => {
+      let t = (el.textContent || "").trim().toLowerCase().replace(/^@+/, "");
+      return t === username;
+    });
+
+    if (!userHeading && username) {
+      userHeading = candidates.find((el) => {
+        let t = (el.textContent || "").trim().toLowerCase().replace(/^@+/, "");
+        return t.startsWith(username) && t.length <= username.length + 6;
+      });
+    }
+
+    if (!userHeading) {
+      userHeading = section.querySelector("h2, h1, [role='heading']");
+    }
+
+    // 2. If we found userHeading, find its container row within section/header
+    if (userHeading) {
+      let curr = userHeading;
+      for (let depth = 0; depth < 6 && curr && curr !== header && curr !== document.body; depth++) {
+        let parent = curr.parentElement;
+        if (!parent || parent === header || parent === document.body) break;
+        
+        let style = window.getComputedStyle(parent);
+        let isFlexRow = style.display.includes("flex") && !style.flexDirection.includes("column");
+        
+        if (isFlexRow && parent !== section) {
+          let insertRef = curr;
+          let siblings = Array.from(parent.children);
+          let currIdx = siblings.indexOf(curr);
+          if (currIdx !== -1) {
+            for (let s = currIdx + 1; s < siblings.length; s++) {
+              let sib = siblings[s];
+              if (sib.id?.startsWith("ig-saver") || sib.dataset?.igSaverProfileActions) continue;
+              let isSmall = sib.getBoundingClientRect().width < 60;
+              if (isSmall) {
+                insertRef = sib;
+              } else {
+                break;
+              }
+            }
+          }
+          return { container: parent, insertAfter: insertRef };
+        }
+        curr = parent;
       }
-      t = t.parentElement;
+
+      if (userHeading.parentElement && userHeading.parentElement !== header && userHeading.parentElement !== document.body) {
+        return { container: userHeading.parentElement, insertAfter: userHeading };
+      }
+    }
+
+    // 3. Fallback to section's first child
+    if (section && section.firstElementChild && section.firstElementChild !== header) {
+      return { container: section.firstElementChild, insertAfter: section.firstElementChild.lastElementChild || section.firstElementChild };
+    }
+
+    return null;
+  }
+
+  function dt() {
+    let header = document.querySelector("header") || document.querySelector("main header");
+    if (!header) return null;
+    let section = header.querySelector("section") || header;
+    let candidates = section.querySelectorAll('button:not([id^="ig-saver"]), div[role="button"]:not([id^="ig-saver"]), a[role="button"]:not([id^="ig-saver"])');
+    for (let e of candidates) {
+      let rect = e.getBoundingClientRect();
+      if (rect.width < 25 || rect.height < 20) continue;
+      let t = e.parentElement;
+      for (
+        let n = 0;
+        t && t !== header && n < 6;
+        n++
+      ) {
+        let style = window.getComputedStyle(t);
+        let isFlexRow = style.display.includes("flex") && !style.flexDirection.includes("column");
+        if (isFlexRow) {
+          let o = t.querySelector('div[role="button"] svg, button svg, svg');
+          let r = o ? (o.closest('div[role="button"], button') || e) : e;
+          return { container: t, similarBtn: r };
+        }
+        t = t.parentElement;
+      }
     }
     return null;
   }
@@ -7369,11 +7692,17 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       t = await getFavoriteProfiles(),
       n = t.findIndex((a) => a.toLowerCase() === e.toLowerCase()),
       o = n < 0;
-    return (
-      o ? t.unshift(e) : t.splice(n, 1),
-      await chrome.storage.local.set({ [FAVORITE_PROFILES_KEY]: t }),
-      { active: o, profiles: t }
-    );
+    o ? t.unshift(e) : t.splice(n, 1);
+    await chrome.storage.local.set({ [FAVORITE_PROFILES_KEY]: t });
+    try {
+      window.postMessage({
+        type: "VIRALDOG_FAVORITE_TOGGLED",
+        platform: "instagram",
+        username: e,
+        active: o
+      }, window.location.origin);
+    } catch(err) {}
+    return { active: o, profiles: t };
   }
   function updateFavoriteButton(i, e) {
     ((i.dataset.active = e ? "true" : "false"),
@@ -7390,26 +7719,32 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       </svg>
     `));
   }
-  function createFavoriteButton(i, e = "62px") {
+  function createFavoriteButton(i) {
     let t = document.createElement("button");
     return (
       (t.id = "ig-saver-favorite-btn"),
       (t.type = "button"),
       (t.dataset.username = i),
+      (t.title = "Adicionar aos favoritos"),
       (t.style.cssText = `
-    width: 38px;
-    min-width: 38px;
-    height: 100%;
-    min-height: 32px;
+    width: 36px;
+    min-width: 36px;
+    height: 36px;
+    min-height: 36px;
+    max-height: 36px;
     padding: 0;
-    background: rgba(142, 142, 142, 0.14);
-    border: 1px solid rgba(142, 142, 142, 0.35);
-    border-radius: ${e};
+    background: rgba(142, 142, 147, 0.15);
+    border: 1px solid rgba(142, 142, 147, 0.28);
+    border-radius: 50%;
     cursor: pointer;
-    display: flex;
+    display: inline-flex;
     align-items: center;
     justify-content: center;
-    transition: background 0.15s, transform 0.15s, color 0.15s;
+    color: currentColor;
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+    transition: all 0.2s cubic-bezier(0.25, 1, 0.5, 1);
   `),
       updateFavoriteButton(t, !1),
       getFavoriteProfiles().then((n) => {
@@ -7419,10 +7754,14 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         );
       }),
       t.addEventListener("mouseenter", () => {
-        t.style.background = "rgba(142, 142, 142, 0.24)";
+        t.style.background = "rgba(142, 142, 147, 0.28)";
+        t.style.borderColor = "rgba(142, 142, 147, 0.45)";
+        t.style.transform = "scale(1.06)";
       }),
       t.addEventListener("mouseleave", () => {
-        t.style.background = "rgba(142, 142, 142, 0.14)";
+        t.style.background = "rgba(142, 142, 147, 0.15)";
+        t.style.borderColor = "rgba(142, 142, 147, 0.28)";
+        t.style.transform = "scale(1)";
       }),
       t.addEventListener("click", async (n) => {
         (n.preventDefault(), n.stopPropagation(), (t.disabled = !0));
@@ -7445,28 +7784,31 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       t
     );
   }
-  function We(i = "62px") {
+  function We() {
     let e = document.createElement("button");
     return (
       (e.id = "ig-saver-btn"),
       (e.type = "button"),
       (e.style.cssText = `
+    height: 36px;
+    min-height: 36px;
+    max-height: 36px;
     padding: 0 16px;
-    height: 100%;
-    background: #0095F6;
-    color: #fff;
+    background: #0071e3;
+    color: #ffffff;
     border: none;
-    border-radius: ${i};
-    font-size: 14px;
+    border-radius: 9999px;
+    font-size: 13.5px;
     font-weight: 600;
     cursor: pointer;
-    transition: background 0.15s;
-    display: flex;
+    transition: all 0.2s cubic-bezier(0.25, 1, 0.5, 1);
+    display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 6px;
     white-space: nowrap;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-    line-height: 18px;
+    box-shadow: 0 4px 14px rgba(0, 113, 227, 0.28);
   `),
       (e.innerHTML = `
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -7478,10 +7820,14 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     <span>${_("btn_download_all")}</span>
   `),
       e.addEventListener("mouseenter", () => {
-        e.style.background = "#1877F2";
+        e.style.background = "#0077ed";
+        e.style.boxShadow = "0 6px 18px rgba(0, 113, 227, 0.38)";
+        e.style.transform = "translateY(-1px)";
       }),
       e.addEventListener("mouseleave", () => {
-        e.style.background = "#0095F6";
+        e.style.background = "#0071e3";
+        e.style.boxShadow = "0 4px 14px rgba(0, 113, 227, 0.28)";
+        e.style.transform = "translateY(0)";
       }),
       e.addEventListener("click", () => Xa()),
       e
@@ -7493,20 +7839,33 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     ((n.dataset.igSaverProfileActions = "true"),
       (n.dataset.username = O()),
       (n.style.cssText = `
-    display: flex;
-    align-items: stretch;
-    align-self: stretch;
+    display: inline-flex;
+    align-items: center;
+    align-self: center;
     flex-shrink: 0;
+    height: 36px;
     gap: ${t || "8px"};
-    ${t ? "" : "margin-left: 8px;"}
+    margin-left: 10px;
+    vertical-align: middle;
   `),
       n.appendChild(e),
-      n.appendChild(createFavoriteButton(O(), te(i.container))));
-    let a = i.similarBtn;
-    for (; a && a.parentElement !== i.container; ) a = a.parentElement;
-    a?.parentElement === i.container
-      ? i.container.insertBefore(n, a)
-      : i.container.appendChild(n);
+      n.appendChild(createFavoriteButton(O())));
+    
+    if (i.insertAfter && i.insertAfter.parentElement === i.container) {
+      if (i.insertAfter.nextSibling) {
+        i.container.insertBefore(n, i.insertAfter.nextSibling);
+      } else {
+        i.container.appendChild(n);
+      }
+    } else if (i.similarBtn) {
+      let a = i.similarBtn;
+      for (; a && a.parentElement !== i.container; ) a = a.parentElement;
+      a?.parentElement === i.container
+        ? i.container.insertBefore(n, a)
+        : i.container.appendChild(n);
+    } else {
+      i.container.appendChild(n);
+    }
   }
   function removeProfileActions() {
     for (let i of document.querySelectorAll(
@@ -7516,59 +7875,68 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     document.getElementById("ig-saver-favorite-btn")?.remove();
   }
   function ct() {
-    let i = document.querySelector("header");
+    let i = document.querySelector("header") || document.querySelector("main header");
     if (!i) return null;
-    let e = i.querySelectorAll("section button, section a[href]");
+    let section = i.querySelector("section") || i;
+    let e = section.querySelectorAll("button, a[href], div[role='button'], a[role='button']");
     for (let t of e) {
       if (t.id?.startsWith("ig-saver")) continue;
       let n = t.getBoundingClientRect();
-      if (n.width < 80 || n.height < 30 || !t.textContent?.trim()) continue;
-      if (t.tagName === "A") {
-        let o = window.getComputedStyle(t).backgroundColor;
-        if (!o || o === "rgba(0, 0, 0, 0)" || o === "transparent") continue;
-      }
+      if (n.width < 30 || n.height < 20) continue;
       let a = t.parentElement;
-      for (; a && a !== i && a.tagName !== "SECTION"; ) {
+      for (let depth = 0; depth < 5 && a && a !== i && a !== section; depth++) {
         let o = window.getComputedStyle(a);
-        if (o.display.includes("flex") && o.flexDirection === "row") return a;
+        if (o.display.includes("flex") && !o.flexDirection.includes("column")) return a;
         a = a.parentElement;
       }
     }
     return null;
   }
   function at(i = 0) {
+    if (!W() || Ta()) return;
+
+    let existingBtn = document.getElementById("ig-saver-btn");
     let existingActions = document.querySelector(
       '[data-ig-saver-profile-actions="true"]',
     );
-    existingActions?.dataset.username !== O() && existingActions?.remove();
-    if (document.getElementById("ig-saver-btn") || !W() || Ta()) return;
+    let header = document.querySelector("header") || document.querySelector("main header");
+
+    if (existingBtn && existingActions && existingActions.isConnected) {
+      if (header && header.contains(existingActions) && existingActions.dataset.username === O()) {
+        return;
+      }
+    }
+
+    removeProfileActions();
+
+    let target = findUsernameRow();
+    if (target && target.container) {
+      let o = te(target.container),
+        r = We(o);
+      _t(target, r);
+      return;
+    }
+
     let e = dt();
-    if (e) {
+    if (e && e.container) {
       let o = te(e.container),
         r = We(o);
       _t(e, r);
       return;
     }
+
     let t = ct();
-    if (t) {
-      let o = te(t),
+    if (t && (t.container || t)) {
+      let c = t.container || t;
+      let o = te(c),
         s = We(o);
-      _t({ container: t, similarBtn: null }, s);
+      _t({ container: c, similarBtn: null }, s);
       return;
     }
-    if (i < 5) {
-      setTimeout(() => at(i + 1), 500 + i * 200);
-      return;
+
+    if (i < 15) {
+      setTimeout(() => at(i + 1), 200 + i * 150);
     }
-    let a = We();
-    let actions = document.createElement("div");
-    ((actions.dataset.igSaverProfileActions = "true"),
-      (actions.dataset.username = O()),
-      (actions.style.cssText =
-        "position: fixed; bottom: 20px; right: 20px; z-index: 10000; display: flex; gap: 8px; height: 34px;"),
-      actions.appendChild(a),
-      actions.appendChild(createFavoriteButton(O())),
-      document.body.appendChild(actions));
   }
   async function La(i) {
     try {
@@ -7660,15 +8028,15 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     border-radius: 50%;
     cursor: pointer;
     opacity: 0;
-    transition: opacity 0.2s;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
     display: flex;
     align-items: center;
     justify-content: center;
-    backdrop-filter: blur(4px);
+    backdrop-filter: blur(6px);
   `),
       (o.innerHTML = `
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white"
-         stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+         stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="filter: drop-shadow(0 1px 2px rgba(0,0,0,0.3));">
       <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
       <polyline points="7 10 12 15 17 10"/>
       <line x1="12" y1="15" x2="12" y2="3"/>
@@ -7679,6 +8047,18 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       }),
       n.addEventListener("mouseleave", () => {
         o.style.opacity = "0";
+      }),
+      o.addEventListener("mouseenter", () => {
+        o.style.background = "#0071e3";
+        o.style.borderColor = "rgba(255, 255, 255, 0.95)";
+        o.style.transform = "scale(1.12)";
+        o.style.boxShadow = "0 4px 14px rgba(0, 113, 227, 0.5)";
+      }),
+      o.addEventListener("mouseleave", () => {
+        o.style.background = "rgba(0, 0, 0, 0.65)";
+        o.style.borderColor = "rgba(255, 255, 255, 0.85)";
+        o.style.transform = "scale(1)";
+        o.style.boxShadow = "none";
       }),
       o.addEventListener("click", async (s) => {
         (s.preventDefault(), s.stopPropagation());
@@ -7714,48 +8094,51 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       n.appendChild(o));
   }
   function ut(i) {
-    let e = i.getAttribute("href")?.match(/\/p\/([^/]+)/);
+    let e = (i.getAttribute("href") ?? "").match(/\/(?:p|reel|reels)\/([^/?#]+)/);
     return e ? e[1] : null;
   }
   function pt(i) {
-    let e = i.getAttribute("href")?.match(/\/reel\/([^/]+)/);
+    let e = (i.getAttribute("href") ?? "").match(/\/(?:p|reel|reels)\/([^/?#]+)/);
     return e ? e[1] : null;
   }
   function Da() {
     if (!W()) return;
     let i = O(),
-      e = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
+      e = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"], a[href*="/reels/"]');
     for (let t of e) {
-      let a = (t.getAttribute("href") ?? "").includes("/reel/"),
-        o = a ? pt(t) : ut(t);
+      let a = (t.getAttribute("href") ?? "").includes("/reel");
+      let o = pt(t) || ut(t);
       if (!o || t.hasAttribute("data-ig-saver-processed")) continue;
       t.setAttribute("data-ig-saver-processed", o);
       let r = t.parentElement;
-      for (let l = 0; l < 3 && r; l++) {
+      for (let l = 0; l < 4 && r; l++) {
         let d = window.getComputedStyle(r).position;
         if (d === "relative" || d === "absolute") break;
         r.parentElement && (r = r.parentElement);
       }
-      if (!r) continue;
+      if (!r) r = t;
       r.setAttribute("data-ig-saver-post-btn", o);
       let s = document.createElement("button");
       ((s.type = "button"),
         s.setAttribute("aria-label", _("aria_download_post_zip")),
         (s.style.cssText = `
       position: absolute;
-      top: 8px;
-      left: 8px;
-      z-index: 10;
-      width: 32px;
-      height: 32px;
+      top: 10px;
+      left: 10px;
+      z-index: 20;
+      width: 34px;
+      height: 34px;
       padding: 0;
-      background: rgba(0, 0, 0, 0.65);
-      color: white;
-      border: none;
+      background: rgba(0, 0, 0, 0.68);
+      color: #ffffff;
+      border: 1px solid rgba(255, 255, 255, 0.2);
       border-radius: 50%;
       cursor: pointer;
-      opacity: 0;
-      transition: opacity 0.2s;
+      opacity: 0.92;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+      transition: all 0.2s cubic-bezier(0.25, 1, 0.5, 1);
       display: flex;
       align-items: center;
       justify-content: center;
@@ -7768,16 +8151,24 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         <line x1="12" y1="15" x2="12" y2="3"/>
       </svg>
     `),
-        r.addEventListener("mouseenter", () => {
+        s.addEventListener("mouseenter", () => {
+          s.style.background = "#0071e3";
+          s.style.borderColor = "rgba(255, 255, 255, 0.4)";
           s.style.opacity = "1";
+          s.style.transform = "scale(1.08)";
+          s.style.boxShadow = "0 6px 20px rgba(0, 113, 227, 0.4)";
         }),
-        r.addEventListener("mouseleave", () => {
-          s.style.opacity = "0";
+        s.addEventListener("mouseleave", () => {
+          s.style.background = "rgba(0, 0, 0, 0.68)";
+          s.style.borderColor = "rgba(255, 255, 255, 0.2)";
+          s.style.opacity = "0.92";
+          s.style.transform = "scale(1)";
+          s.style.boxShadow = "0 4px 14px rgba(0, 0, 0, 0.25)";
         }),
         s.addEventListener("click", (l) => {
           (l.preventDefault(), l.stopPropagation(), ht(i, o, s, a));
         }),
-        (r.style.position = r.style.position || "relative"),
+        (r.style.position = r.style.position === "static" || !r.style.position ? "relative" : r.style.position),
         r.insertBefore(s, r.firstChild));
     }
   }
@@ -7802,19 +8193,22 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         r.setAttribute("aria-label", _("aria_download_post_zip")),
         (r.style.cssText = `
       position: absolute;
-      top: 8px;
-      left: 8px;
-      z-index: 10;
-      width: 32px;
-      height: 32px;
+      top: 10px;
+      left: 10px;
+      z-index: 20;
+      width: 34px;
+      height: 34px;
       padding: 0;
-      background: rgba(0, 0, 0, 0.65);
-      color: white;
-      border: none;
+      background: rgba(0, 0, 0, 0.68);
+      color: #ffffff;
+      border: 1px solid rgba(255, 255, 255, 0.2);
       border-radius: 50%;
       cursor: pointer;
-      opacity: 0;
-      transition: opacity 0.2s;
+      opacity: 0.92;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+      transition: all 0.2s cubic-bezier(0.25, 1, 0.5, 1);
       display: flex;
       align-items: center;
       justify-content: center;
@@ -7827,11 +8221,19 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         <line x1="12" y1="15" x2="12" y2="3"/>
       </svg>
     `),
-        o.addEventListener("mouseenter", () => {
+        r.addEventListener("mouseenter", () => {
+          r.style.background = "#0071e3";
+          r.style.borderColor = "rgba(255, 255, 255, 0.4)";
           r.style.opacity = "1";
+          r.style.transform = "scale(1.08)";
+          r.style.boxShadow = "0 6px 20px rgba(0, 113, 227, 0.4)";
         }),
-        o.addEventListener("mouseleave", () => {
-          r.style.opacity = "0";
+        r.addEventListener("mouseleave", () => {
+          r.style.background = "rgba(0, 0, 0, 0.68)";
+          r.style.borderColor = "rgba(255, 255, 255, 0.2)";
+          r.style.opacity = "0.92";
+          r.style.transform = "scale(1)";
+          r.style.boxShadow = "0 4px 14px rgba(0, 0, 0, 0.25)";
         }),
         r.addEventListener("click", (s) => {
           (s.preventDefault(), s.stopPropagation(), oa(a, r, n));
@@ -7899,35 +8301,52 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         s = Yt(e);
       if (!s) continue;
       let l = document.createElement("button");
-      ((l.type = "button"),
-        l.setAttribute("aria-label", _("aria_download_post")),
-        (l.style.cssText = `
-      position: absolute;
-      top: 8px;
-      left: 8px;
-      z-index: 10;
-      width: 32px;
-      height: 32px;
-      padding: 0;
-      background: rgba(0, 0, 0, 0.65);
-      color: white;
-      border: none;
-      border-radius: 50%;
-      cursor: pointer;
-      opacity: 0;
-      transition: opacity 0.2s;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    `),
-        (l.innerHTML = `
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white"
-           stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-        <polyline points="7 10 12 15 17 10"/>
-        <line x1="12" y1="15" x2="12" y2="3"/>
-      </svg>
-    `));
+      l.type = "button";
+      l.setAttribute("aria-label", _("aria_download_post"));
+      l.style.cssText = `
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        z-index: 20;
+        width: 34px;
+        height: 34px;
+        padding: 0;
+        background: rgba(0, 0, 0, 0.68);
+        color: #ffffff;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        border-radius: 50%;
+        cursor: pointer;
+        opacity: 0.92;
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+        transition: all 0.2s cubic-bezier(0.25, 1, 0.5, 1);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      `;
+      l.innerHTML = `
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white"
+             stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+      `;
+      l.addEventListener("mouseenter", () => {
+        l.style.background = "#0071e3";
+        l.style.borderColor = "rgba(255, 255, 255, 0.4)";
+        l.style.opacity = "1";
+        l.style.transform = "scale(1.08)";
+        l.style.boxShadow = "0 6px 20px rgba(0, 113, 227, 0.4)";
+      });
+      l.addEventListener("mouseleave", () => {
+        l.style.background = "rgba(0, 0, 0, 0.68)";
+        l.style.borderColor = "rgba(255, 255, 255, 0.2)";
+        l.style.opacity = "0.92";
+        l.style.transform = "scale(1)";
+        l.style.boxShadow = "0 4px 14px rgba(0, 0, 0, 0.25)";
+      });
       let d = "unknown";
       for (let c of e.querySelectorAll('a[href^="/"]')) {
         let p = (c.getAttribute("href") ?? "").match(/^\/([^/]+)\/$/);
@@ -7947,17 +8366,13 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
           break;
         }
       }
-      (e.addEventListener("mouseenter", () => {
-        l.style.opacity = "1";
-      }),
-        e.addEventListener("mouseleave", () => {
-          l.style.opacity = "0";
-        }),
-        l.addEventListener("click", (c) => {
-          (c.preventDefault(), c.stopPropagation(), Ha(r, d, l, a));
-        }),
-        s.insertBefore(l, s.firstChild),
-        e.setAttribute("data-ig-saver-feed-processed", r));
+      l.addEventListener("click", (c) => {
+        c.preventDefault();
+        c.stopPropagation();
+        Ha(r, d, l, a);
+      });
+      s.insertBefore(l, s.firstChild);
+      e.setAttribute("data-ig-saver-feed-processed", r);
     }
   }
   function Ra(i) {
@@ -8647,12 +9062,26 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       ((d.type = "button"),
         d.setAttribute("aria-label", _("btn_download_collection")),
         (d.style.cssText = `
-      position: absolute; top: 8px; left: 8px; z-index: 10;
-      width: 32px; height: 32px; padding: 0;
-      background: rgba(0, 0, 0, 0.65); color: white; border: none;
-      border-radius: 50%; cursor: pointer; opacity: 0;
-      transition: opacity 0.2s;
-      display: flex; align-items: center; justify-content: center;
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 20;
+      width: 34px;
+      height: 34px;
+      padding: 0;
+      background: rgba(0, 0, 0, 0.68);
+      color: #ffffff;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 50%;
+      cursor: pointer;
+      opacity: 0.92;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+      transition: all 0.2s cubic-bezier(0.25, 1, 0.5, 1);
+      display: flex;
+      align-items: center;
+      justify-content: center;
     `),
         (d.innerHTML = `
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white"
@@ -8662,11 +9091,19 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         <line x1="12" y1="15" x2="12" y2="3"/>
       </svg>
     `),
-        l.addEventListener("mouseenter", () => {
+        d.addEventListener("mouseenter", () => {
+          d.style.background = "#0071e3";
+          d.style.borderColor = "rgba(255, 255, 255, 0.4)";
           d.style.opacity = "1";
+          d.style.transform = "scale(1.08)";
+          d.style.boxShadow = "0 6px 20px rgba(0, 113, 227, 0.4)";
         }),
-        l.addEventListener("mouseleave", () => {
-          d.style.opacity = "0";
+        d.addEventListener("mouseleave", () => {
+          d.style.background = "rgba(0, 0, 0, 0.68)";
+          d.style.borderColor = "rgba(255, 255, 255, 0.2)";
+          d.style.opacity = "0.92";
+          d.style.transform = "scale(1)";
+          d.style.boxShadow = "0 4px 14px rgba(0, 0, 0, 0.25)";
         }),
         d.addEventListener("click", (c) => {
           (c.preventDefault(), c.stopPropagation());
@@ -8939,10 +9376,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
           <label style="${s}">${_("dialog_filter_comments")}</label>
           <input type="number" id="ig-saver-filter-comments" min="0" placeholder="ex: 100" class="ig-saver-field">
         </div>
-        <div>
-          <label style="${s}">${_("dialog_filter_saves")}</label>
-          <input type="number" id="ig-saver-filter-saves" min="0" placeholder="ex: 50" class="ig-saver-field">
-        </div>
+
       </div>
     </details>
   `),
@@ -9003,7 +9437,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         let minLikes = parseInt(a.querySelector("#ig-saver-filter-likes")?.value, 10) || 0;
         let minViews = parseInt(a.querySelector("#ig-saver-filter-views")?.value, 10) || 0;
         let minComments = parseInt(a.querySelector("#ig-saver-filter-comments")?.value, 10) || 0;
-        let minSaves = parseInt(a.querySelector("#ig-saver-filter-saves")?.value, 10) || 0;
+        let minSaves = 0;
         let hashtag = a.querySelector("#ig-saver-filter-hashtag")?.value || "";
         (I(),
           x.length === 1
@@ -9034,8 +9468,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     }
     let filterInputs = [
       "ig-saver-filter-hashtag", "ig-saver-filter-likes", 
-      "ig-saver-filter-views", "ig-saver-filter-comments", 
-      "ig-saver-filter-saves"
+      "ig-saver-filter-views", "ig-saver-filter-comments"
     ];
     for (let fid of filterInputs) {
       let el = a.querySelector("#" + fid);
@@ -9371,10 +9804,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
           <label style="${l}">${_("dialog_filter_comments")}</label>
           <input type="number" id="ig-saver-filter-comments" min="0" placeholder="ex: 100" style="${s} box-sizing: border-box;">
         </div>
-        <div>
-          <label style="${l}">${_("dialog_filter_saves")}</label>
-          <input type="number" id="ig-saver-filter-saves" min="0" placeholder="ex: 50" style="${s} box-sizing: border-box;">
-        </div>
+
       </div>
     </details>
     <div id="ig-saver-saved-col-estimate" style="font-size: 13px; color: ${e.textSecondary}; margin-bottom: 12px; font-weight: 500; text-align: center; margin-top: 10px;"></div>
@@ -9445,7 +9875,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
           let minLikes = parseInt(o.querySelector("#ig-saver-filter-likes")?.value, 10) || 0;
           let minViews = parseInt(o.querySelector("#ig-saver-filter-views")?.value, 10) || 0;
           let minComments = parseInt(o.querySelector("#ig-saver-filter-comments")?.value, 10) || 0;
-          let minSaves = parseInt(o.querySelector("#ig-saver-filter-saves")?.value, 10) || 0;
+          let minSaves = 0;
           let hashtag = o.querySelector("#ig-saver-filter-hashtag")?.value || "";
           (d(), m(_("notify_fetching_collections"), "success"));
           try {
@@ -9492,12 +9922,10 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     let fL = document.getElementById("ig-saver-filter-likes");
     let fV = document.getElementById("ig-saver-filter-views");
     let fC = document.getElementById("ig-saver-filter-comments");
-    let fS = document.getElementById("ig-saver-filter-saves");
     if (fH) fH.value = "";
     if (fL) fL.value = "";
     if (fV) fV.value = "";
     if (fC) fC.value = "";
-    if (fS) fS.value = "";
     updateActiveFiltersBadge();
     updateEstimatePreview();
   }
@@ -9508,13 +9936,11 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     let likes = (document.getElementById("ig-saver-filter-likes")?.value || "").trim();
     let views = (document.getElementById("ig-saver-filter-views")?.value || "").trim();
     let comments = (document.getElementById("ig-saver-filter-comments")?.value || "").trim();
-    let saves = (document.getElementById("ig-saver-filter-saves")?.value || "").trim();
 
     if (hashtag) count++;
     if (likes && parseInt(likes, 10) > 0) count++;
     if (views && parseInt(views, 10) > 0) count++;
     if (comments && parseInt(comments, 10) > 0) count++;
-    if (saves && parseInt(saves, 10) > 0) count++;
 
     let countSpan = document.getElementById("ig-saver-active-filters-count");
     let badge = document.getElementById("ig-saver-active-filters-badge");
@@ -9548,12 +9974,26 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       ((s.type = "button"),
         s.setAttribute("aria-label", _("aria_download_post_zip")),
         (s.style.cssText = `
-      position: absolute; top: 8px; left: 8px; z-index: 10;
-      width: 32px; height: 32px; padding: 0;
-      background: rgba(0, 0, 0, 0.65); color: white; border: none;
-      border-radius: 50%; cursor: pointer; opacity: 0;
-      transition: opacity 0.2s;
-      display: flex; align-items: center; justify-content: center;
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 20;
+      width: 34px;
+      height: 34px;
+      padding: 0;
+      background: rgba(0, 0, 0, 0.68);
+      color: #ffffff;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 50%;
+      cursor: pointer;
+      opacity: 0.92;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+      transition: all 0.2s cubic-bezier(0.25, 1, 0.5, 1);
+      display: flex;
+      align-items: center;
+      justify-content: center;
     `),
         (s.innerHTML = `
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white"
@@ -9563,11 +10003,19 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         <line x1="12" y1="15" x2="12" y2="3"/>
       </svg>
     `),
-        r.addEventListener("mouseenter", () => {
+        s.addEventListener("mouseenter", () => {
+          s.style.background = "#0071e3";
+          s.style.borderColor = "rgba(255, 255, 255, 0.4)";
           s.style.opacity = "1";
+          s.style.transform = "scale(1.08)";
+          s.style.boxShadow = "0 6px 20px rgba(0, 113, 227, 0.4)";
         }),
-        r.addEventListener("mouseleave", () => {
-          s.style.opacity = "0";
+        s.addEventListener("mouseleave", () => {
+          s.style.background = "rgba(0, 0, 0, 0.68)";
+          s.style.borderColor = "rgba(255, 255, 255, 0.2)";
+          s.style.opacity = "0.92";
+          s.style.transform = "scale(1)";
+          s.style.boxShadow = "0 4px 14px rgba(0, 0, 0, 0.25)";
         }),
         s.addEventListener("click", (l) => {
           (l.preventDefault(), l.stopPropagation(), ht(i, o, s, a));
@@ -9613,22 +10061,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     }
     if (i) return;
     let e = (r) => () => Z({ reason: r, getTheme: L });
-    {
-      let r = document.getElementById("ig-saver-include-highlights");
-      if (r) {
-        ((r.checked = !1), (r.disabled = !0));
-        let s = r.parentElement?.querySelector("span");
-        s &&
-          !s.querySelector(".ig-saver-pro-badge") &&
-          s.insertAdjacentHTML("beforeend", Ka());
-        let l = r.parentElement;
-        l &&
-          ((l.style.cursor = "pointer"),
-          l.addEventListener("click", (d) => {
-            (d.preventDefault(), e("extras")());
-          }));
-      }
-    }
+
     let t = document.getElementById("ig-saver-strategy");
     if (t) {
       let r = t.querySelector('option[value="range"]');
@@ -9718,7 +10151,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
 
     let perProfilePosts = null;
     if (strategy === "topk") {
-      perProfilePosts = parseInt(document.getElementById("ig-saver-topk-value")?.value, 10) || 0;
+      perProfilePosts = parseInt(document.getElementById("ig-saver-quantity-input")?.value || document.getElementById("ig-saver-topk-value")?.value, 10) || 0;
     } else if (strategy === "lastNDays") {
       let daysSelect = document.getElementById("ig-saver-ndays");
       let days = daysSelect ? parseInt(daysSelect.value, 10) : 0;
@@ -9935,14 +10368,12 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     let likes = document.getElementById("ig-saver-filter-likes")?.value || "";
     let views = document.getElementById("ig-saver-filter-views")?.value || "";
     let comments = document.getElementById("ig-saver-filter-comments")?.value || "";
-    let saves = document.getElementById("ig-saver-filter-saves")?.value || "";
     
     let count = 0;
     if (hashtag) count++;
     if (likes) count++;
     if (views) count++;
     if (comments) count++;
-    if (saves) count++;
     
     let badge = document.getElementById("ig-saver-active-filters-count");
     if (badge) badge.textContent = String(count);
@@ -9958,7 +10389,6 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     if (document.getElementById("ig-saver-filter-likes")) document.getElementById("ig-saver-filter-likes").value = "";
     if (document.getElementById("ig-saver-filter-views")) document.getElementById("ig-saver-filter-views").value = "";
     if (document.getElementById("ig-saver-filter-comments")) document.getElementById("ig-saver-filter-comments").value = "";
-    if (document.getElementById("ig-saver-filter-saves")) document.getElementById("ig-saver-filter-saves").value = "";
     updateActiveFiltersBadge();
     updateEstimatePreview();
   }
@@ -10110,21 +10540,121 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
 
       /* Injected profile download button (Apple Pill style) */
       #ig-saver-btn {
+        height: 36px !important;
+        min-height: 36px !important;
+        max-height: 36px !important;
+        padding: 0 16px !important;
+        border-radius: 9999px !important;
         background-color: #0071e3 !important;
         color: #ffffff !important;
-        border-radius: 9999px !important;
         border: none !important;
+        font-size: 13.5px !important;
         font-weight: 600 !important;
-        box-shadow: 0 4px 12px rgba(0, 113, 227, 0.2) !important;
+        box-shadow: 0 4px 14px rgba(0, 113, 227, 0.28) !important;
         transition: background-color 0.2s, transform 0.2s, box-shadow 0.2s !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        box-sizing: border-box !important;
       }
       #ig-saver-btn:hover {
         background-color: #0077ed !important;
-        transform: scale(1.02) !important;
-        box-shadow: 0 6px 16px rgba(0, 113, 227, 0.3) !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 6px 18px rgba(0, 113, 227, 0.38) !important;
       }
       #ig-saver-btn:active {
         transform: scale(0.98) !important;
+      }
+
+      /* Injected favorite button (Apple circular icon button) */
+      #ig-saver-favorite-btn {
+        width: 36px !important;
+        min-width: 36px !important;
+        max-width: 36px !important;
+        height: 36px !important;
+        min-height: 36px !important;
+        max-height: 36px !important;
+        border-radius: 50% !important;
+        background: rgba(142, 142, 147, 0.15) !important;
+        border: 1px solid rgba(142, 142, 147, 0.28) !important;
+        box-sizing: border-box !important;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+      }
+      #ig-saver-favorite-btn:hover {
+        background: rgba(142, 142, 147, 0.28) !important;
+        border-color: rgba(142, 142, 147, 0.45) !important;
+        transform: scale(1.06) !important;
+      }
+
+      /* Injected grid, feed, reels, and single post download button (Fixed glassmorphism circle with blue hover) */
+      [data-ig-saver-post-btn] > button,
+      #ig-saver-single-btn,
+      #ig-saver-reels-btn {
+        width: 34px !important;
+        height: 34px !important;
+        border-radius: 50% !important;
+        background: rgba(0, 0, 0, 0.68) !important;
+        border: 1px solid rgba(255, 255, 255, 0.2) !important;
+        opacity: 0.92 !important;
+        backdrop-filter: blur(12px) !important;
+        -webkit-backdrop-filter: blur(12px) !important;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25) !important;
+        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+      }
+      [data-ig-saver-post-btn] > button:hover,
+      #ig-saver-single-btn:hover,
+      #ig-saver-reels-btn:hover {
+        background: #0071e3 !important;
+        border-color: rgba(255, 255, 255, 0.4) !important;
+        opacity: 1 !important;
+        transform: scale(1.08) !important;
+        box-shadow: 0 6px 20px rgba(0, 113, 227, 0.4) !important;
+      }
+
+      /* Injected story viewer single and all download buttons */
+      #ig-saver-story-btn {
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        border-radius: 50% !important;
+      }
+      #ig-saver-story-btn:hover {
+        background: #0071e3 !important;
+        transform: scale(1.1) !important;
+        box-shadow: 0 4px 16px rgba(0, 113, 227, 0.45) !important;
+      }
+      #ig-saver-story-all-btn {
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        border-radius: 9999px !important;
+      }
+      #ig-saver-story-all-btn:hover {
+        background: #0071e3 !important;
+        transform: scale(1.05) !important;
+        box-shadow: 0 4px 14px rgba(0, 113, 227, 0.4) !important;
+      }
+
+      /* Injected avatar HD download button */
+      #ig-saver-avatar-btn {
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+      }
+      #ig-saver-avatar-btn:hover {
+        background: #0071e3 !important;
+        border-color: rgba(255, 255, 255, 0.9) !important;
+        opacity: 1 !important;
+        transform: scale(1.1) !important;
+        box-shadow: 0 6px 20px rgba(0, 113, 227, 0.4) !important;
+      }
+
+      /* Injected saved collections buttons */
+      #ig-saver-saved-btn,
+      #ig-saver-saved-col-btn {
+        background: #0071e3 !important;
+        border-radius: 9999px !important;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+      }
+      #ig-saver-saved-btn:hover,
+      #ig-saver-saved-col-btn:hover {
+        background: #0077ed !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 6px 18px rgba(0, 113, 227, 0.38) !important;
       }
 
       /* Modal Background Overlay */
@@ -10135,6 +10665,15 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       }
 
       /* Clean Apple-style Card (Fixed without scroll) */
+      .ig-saver-modal-row {
+        display: flex !important;
+        align-items: stretch !important;
+        justify-content: center !important;
+        gap: 12px !important;
+        max-width: 95vw !important;
+        box-sizing: border-box !important;
+      }
+
       .ig-saver-glass-card {
         background: #ffffff !important;
         border: 1px solid #e8e8ed !important;
@@ -10147,6 +10686,9 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         overflow: visible !important;
         box-sizing: border-box !important;
         color: #1d1d1f !important;
+        display: flex !important;
+        flex-direction: column !important;
+        justify-content: space-between !important;
       }
 
       /* Hide background neon meshes */
@@ -10287,12 +10829,12 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
 
       .ig-saver-filters-flyout {
         display: none;
-        width: 290px !important;
+        width: 300px !important;
         background: #ffffff !important;
-        border-radius: 20px !important;
+        border-radius: 18px !important;
         box-shadow: 0 20px 50px rgba(0, 0, 0, 0.16) !important;
         border: 1px solid #e8e8ed !important;
-        padding: 16px 18px !important;
+        padding: 14px 16px !important;
         box-sizing: border-box !important;
         animation: igSaverFlyoutSlide 0.22s cubic-bezier(0.16, 1, 0.3, 1) !important;
         z-index: 10003 !important;
@@ -10301,6 +10843,73 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       .ig-saver-filters-flyout.is-open {
         display: flex !important;
         flex-direction: column !important;
+        justify-content: space-between !important;
+      }
+      .ig-saver-flyout-fields {
+        display: flex !important;
+        flex-direction: column !important;
+        justify-content: flex-start !important;
+        gap: 8px !important;
+        margin-bottom: 8px !important;
+      }
+      .ig-saver-flyout-fields .ig-saver-stepper {
+        height: 36px !important;
+      }
+      .ig-saver-flyout-fields .ig-saver-stepper-btn {
+        height: 36px !important;
+        width: 36px !important;
+        font-size: 16px !important;
+      }
+      .ig-saver-flyout-fields .ig-saver-stepper-input {
+        height: 36px !important;
+        font-size: 13px !important;
+      }
+      .ig-saver-flyout-fields .ig-saver-field {
+        height: 36px !important;
+        min-height: 36px !important;
+        font-size: 13px !important;
+        padding: 6px 10px !important;
+      }
+      .ig-saver-flyout-footer {
+        display: flex !important;
+        gap: 8px !important;
+        margin-top: auto !important;
+        padding-top: 10px !important;
+        border-top: 1px solid #f0f0f2 !important;
+      }
+      .ig-saver-flyout-apply-btn {
+        flex: 2 !important;
+        height: 38px !important;
+        border-radius: 9999px !important;
+        background: #0071e3 !important;
+        color: #ffffff !important;
+        border: none !important;
+        font-size: 13px !important;
+        font-weight: 600 !important;
+        cursor: pointer !important;
+        font-family: inherit !important;
+        transition: background-color 0.2s, transform 0.15s !important;
+      }
+      .ig-saver-flyout-apply-btn:hover {
+        background: #0077ed !important;
+        transform: translateY(-1px) !important;
+      }
+      .ig-saver-flyout-clean-btn {
+        flex: 1 !important;
+        height: 38px !important;
+        border-radius: 9999px !important;
+        background: #f5f5f7 !important;
+        color: #1d1d1f !important;
+        border: 1px solid #e8e8ed !important;
+        font-size: 13px !important;
+        font-weight: 600 !important;
+        cursor: pointer !important;
+        font-family: inherit !important;
+        transition: background-color 0.2s, color 0.15s !important;
+      }
+      .ig-saver-flyout-clean-btn:hover {
+        background: #ebebeb !important;
+        color: #ff3b30 !important;
       }
       @keyframes igSaverFlyoutSlide {
         from { opacity: 0; transform: translateX(-12px) scale(0.96); }
@@ -11127,9 +11736,9 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       .ig-saver-btn-secondary {
         flex: 1 !important;
         padding: 14px 24px !important;
-        background: var(--ig-hover-bg) !important;
-        color: var(--ig-text) !important;
-        border: 1px solid var(--ig-border) !important;
+        background: #f0f0f4 !important;
+        color: #1d1d1f !important;
+        border: 1px solid #e8e8ed !important;
         border-radius: 9999px !important;
         font-size: 15px !important;
         font-weight: 600 !important;
@@ -11140,7 +11749,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       }
 
       .ig-saver-btn-secondary:hover {
-        background-color: var(--ig-border) !important;
+        background-color: #e4e4e9 !important;
         transform: scale(1.01) !important;
       }
 
@@ -11153,45 +11762,156 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         display: flex !important;
         align-items: center !important;
         gap: 12px !important;
-        padding: 14px !important;
-        background: var(--ig-hover-bg) !important;
-        border: 1px solid var(--ig-border) !important;
+        padding: 12px 14px !important;
+        background: #f5f5f7 !important;
+        border: 1px solid #e8e8ed !important;
         border-radius: 16px !important;
-        margin-top: 8px !important;
+        margin-top: 4px !important;
         animation: igSaverSlideUp 0.25s cubic-bezier(0.25, 1, 0.5, 1) !important;
       }
 
       .ig-saver-profile-avatar {
-        width: 46px !important;
-        height: 46px !important;
+        width: 44px !important;
+        height: 44px !important;
         border-radius: 50% !important;
         object-fit: cover !important;
-        border: 1px solid var(--ig-border) !important;
+        border: 1.5px solid #ffffff !important;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08) !important;
       }
 
       .ig-saver-profile-info {
         flex: 1 !important;
+        min-width: 0 !important;
         text-align: left !important;
       }
 
       .ig-saver-profile-name {
-        font-size: 14.5px !important;
+        font-size: 14px !important;
         font-weight: 700 !important;
-        color: var(--ig-text) !important;
+        color: #1d1d1f !important;
+        line-height: 1.2 !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
       }
 
       .ig-saver-profile-handle {
-        font-size: 12.5px !important;
-        color: var(--ig-text-sec) !important;
+        font-size: 12px !important;
+        color: #86868b !important;
+        line-height: 1.2 !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
       }
 
       .ig-saver-profile-posts {
-        font-size: 12px !important;
+        font-size: 11.5px !important;
         font-weight: 700 !important;
         color: #0071e3 !important;
-        background: rgba(0, 113, 227, 0.08) !important;
-        padding: 4px 10px !important;
+        background: rgba(0, 113, 227, 0.1) !important;
+        padding: 3px 8px !important;
         border-radius: 9999px !important;
+      }
+
+      .ig-saver-profile-favorite-btn {
+        width: 34px !important;
+        height: 34px !important;
+        border-radius: 50% !important;
+        border: 1px solid #e8e8ed !important;
+        background: #ffffff !important;
+        color: #86868b !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        cursor: pointer !important;
+        transition: all 0.2s ease !important;
+        outline: none !important;
+        flex-shrink: 0 !important;
+        margin-left: 4px !important;
+        padding: 0 !important;
+      }
+
+      .ig-saver-profile-favorite-btn:hover {
+        background: #f5f5f7 !important;
+        color: #ff9500 !important;
+        border-color: #ff9500 !important;
+      }
+
+      .ig-saver-profile-favorite-btn.active {
+        background: rgba(255, 149, 0, 0.1) !important;
+        color: #ff9500 !important;
+        border-color: #ff9500 !important;
+      }
+
+      .ig-saver-profile-favorite-btn.active svg {
+        fill: #ff9500 !important;
+      }
+
+      /* Estimate Summary Line */
+      .ig-saver-estimate-summary {
+        font-size: 12px !important;
+        font-weight: 500 !important;
+        color: #86868b !important;
+        text-align: center !important;
+        margin: 10px 0 6px 0 !important;
+        letter-spacing: -0.01em !important;
+      }
+
+      /* In-Modal Progress Box */
+      .ig-saver-modal-progress-box {
+        background: #f5f5f7 !important;
+        border: 1px solid #e8e8ed !important;
+        border-radius: 12px !important;
+        padding: 10px 14px !important;
+        margin: 8px 0 10px 0 !important;
+        display: none !important;
+        flex-direction: column !important;
+        gap: 8px !important;
+        animation: igSaverSlideUp 0.25s cubic-bezier(0.16, 1, 0.3, 1) !important;
+      }
+
+      .ig-saver-modal-progress-box.visible {
+        display: flex !important;
+      }
+
+      .ig-saver-modal-status-text {
+        font-size: 12.5px !important;
+        font-weight: 600 !important;
+        color: #1d1d1f !important;
+        display: flex !important;
+        align-items: center !important;
+        gap: 6px !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+      }
+
+      .ig-saver-modal-progress-track {
+        width: 100% !important;
+        height: 6px !important;
+        background: #e8e8ed !important;
+        border-radius: 9999px !important;
+        overflow: hidden !important;
+        position: relative !important;
+      }
+
+      .ig-saver-modal-progress-fill {
+        height: 100% !important;
+        width: 0%;
+        background: #0071e3 !important;
+        border-radius: 9999px !important;
+        transition: width 0.3s cubic-bezier(0.25, 0.8, 0.25, 1) !important;
+      }
+
+      .ig-saver-modal-progress-fill.indeterminate {
+        width: 35% !important;
+        animation: igSaverIndeterminate 1.4s ease-in-out infinite !important;
+      }
+
+      @keyframes igSaverIndeterminate {
+        0% { transform: translateX(-100%); }
+        50% { transform: translateX(180%); }
+        100% { transform: translateX(350%); }
       }
 
       @keyframes igSaverSlideUp {
@@ -11355,6 +12075,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     `;
     document.head.appendChild(style);
   }
+  var modalDownloadState = { isDownloading: false, activeTaskId: null, isPaused: false };
   function Xa() {
     injectDialogStyles();
     let i = document.getElementById("ig-saver-dialog");
@@ -11414,7 +12135,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         </div>
 
         <div style="margin-bottom: 8px;">
-          <label style="${r}">${_("dialog_media_type")}</label>
+          <label style="${r}">${_("dialog_media_type") || "TIPO DE MÍDIA"}</label>
           <div class="ig-saver-segmented-group" id="ig-saver-filter-segmented">
             <button type="button" class="ig-saver-segment-btn active" data-value="all">Tudo</button>
             <button type="button" class="ig-saver-segment-btn" data-value="photos">${_("dialog_media_photos") || "Apenas fotos"}</button>
@@ -11423,220 +12144,54 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
           <input type="hidden" id="ig-saver-filter" value="all">
         </div>
 
-        <div id="ig-saver-extras-group" style="margin-bottom: 0px;">
-          <label style="${r}">${_("dialog_extras")}</label>
-          
-          <div class="ig-saver-switch-container" id="ig-saver-toggle-stories-row" style="margin-bottom: 4px;">
-            <span style="font-size: 13px; color: var(--ig-text); font-weight: 600;">${_("dialog_include_stories")}</span>
-            <label class="ig-saver-switch">
-              <input type="checkbox" id="ig-saver-include-stories">
-              <span class="ig-saver-slider"></span>
-            </label>
+        <div style="margin-bottom: 8px;">
+          <label style="${r}">QUANTIDADE DE POSTS</label>
+          <div class="ig-saver-segmented-group" id="ig-saver-strategy-segmented">
+            <button type="button" class="ig-saver-segment-btn active" data-value="all">Tudo</button>
+            <button type="button" class="ig-saver-segment-btn" data-value="topk">Definir quantidade</button>
           </div>
-
-          <div class="ig-saver-switch-container" id="ig-saver-toggle-highlights-row">
-            <span style="font-size: 13px; color: var(--ig-text); font-weight: 600;">${_("dialog_include_highlights")}</span>
-            <label class="ig-saver-switch">
-              <input type="checkbox" id="ig-saver-include-highlights">
-              <span class="ig-saver-slider"></span>
-            </label>
-          </div>
-        </div>
-      </div>
-
-      <div class="ig-saver-section">
-        
-        <div style="margin-bottom: 14px; display: none;">
-          <label style="${r}">${_("dialog_save_method")}</label>
-          <select id="ig-saver-folder-mode" class="ig-saver-field">
-            <option value="grouped">${_("dialog_save_grouped")}</option>
-            <option value="flat" selected>${_("dialog_save_flat")}</option>
-          </select>
-        </div>
-
-        <div style="margin-bottom: 0;">
-          <label style="${r}">${_("dialog_range")}</label>
-          <div class="ig-saver-custom-select" id="ig-saver-strategy-custom">
-            <button type="button" class="ig-saver-custom-select-trigger" id="ig-saver-strategy-trigger">
-              <span id="ig-saver-strategy-label">${_("dialog_range_all") || "Baixar tudo"}</span>
-              <svg class="ig-saver-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-            </button>
-            <div class="ig-saver-custom-select-menu" id="ig-saver-strategy-menu">
-              <div class="ig-saver-select-option active" data-value="all">
-                <span>${_("dialog_range_all") || "Baixar tudo"}</span>
-                <svg class="ig-saver-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#0071E3" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-              </div>
-              <div class="ig-saver-select-option" data-value="topk">
-                <span>${_("dialog_range_topk") || "Primeiras N publicações (mais recentes)"}</span>
-                <svg class="ig-saver-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#0071E3" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display: none;"><polyline points="20 6 9 17 4 12"/></svg>
-              </div>
-              <div class="ig-saver-select-option" data-value="range">
-                <span>${_("dialog_range_custom") || "Intervalo de datas personalizado"}</span>
-                <svg class="ig-saver-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#0071E3" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display: none;"><polyline points="20 6 9 17 4 12"/></svg>
-              </div>
+          <div id="ig-saver-quantity-stepper-wrap" style="display: none; margin-top: 6px;">
+            <div class="ig-saver-stepper" style="width: 100%;">
+              <button type="button" id="ig-saver-quantity-dec" class="ig-saver-stepper-btn">&minus;</button>
+              <input type="number" inputmode="numeric" id="ig-saver-quantity-input" min="0" placeholder="ex: 50" value="50" class="ig-saver-stepper-input">
+              <button type="button" id="ig-saver-quantity-inc" class="ig-saver-stepper-btn">+</button>
             </div>
           </div>
           <input type="hidden" id="ig-saver-strategy" value="all">
         </div>
 
-        <div id="ig-saver-topk-group" style="display: none; margin-bottom: 10px; margin-top: 8px;">
-          <label style="${r}">${_("dialog_post_count")}</label>
-          <div class="ig-saver-stepper">
-            <button type="button" id="ig-saver-topk-dec" class="ig-saver-stepper-btn">&minus;</button>
-            <input type="number" inputmode="numeric" id="ig-saver-topk-value" min="0" value="20" placeholder="20" class="ig-saver-stepper-input">
-            <button type="button" id="ig-saver-topk-inc" class="ig-saver-stepper-btn">+</button>
-          </div>
-        </div>
 
-        <div id="ig-saver-range-group" style="display: none; margin-bottom: 10px; margin-top: 8px;">
-          <label style="${r}">${_("dialog_range_custom") || "Intervalo de datas"}</label>
-          <div class="ig-saver-daterange-picker" id="ig-saver-daterange-picker">
-            <button type="button" class="ig-saver-daterange-trigger" id="ig-saver-daterange-trigger">
-              <div class="ig-saver-daterange-trigger-content">
-                <svg class="ig-saver-calendar-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
-                  <line x1="16" y1="2" x2="16" y2="6"/>
-                  <line x1="8" y1="2" x2="8" y2="6"/>
-                  <line x1="3" y1="10" x2="21" y2="10"/>
-                </svg>
-                <span id="ig-saver-daterange-display" class="ig-saver-daterange-text placeholder">Selecione o período</span>
-              </div>
-              <span id="ig-saver-daterange-badge" class="ig-saver-daterange-badge" style="display: none;">0 dias</span>
-            </button>
-            
-            <!-- Hidden inputs maintaining complete backward compatibility with core crawler logic -->
-            <input type="hidden" id="ig-saver-from" value="">
-            <input type="hidden" id="ig-saver-to" value="">
+      </div>
 
-            <!-- Floating Apple Calendar Popover -->
-            <div class="ig-saver-calendar-popover" id="ig-saver-calendar-popover">
-              <!-- Quick Presets -->
-              <div class="ig-saver-cal-presets" id="ig-saver-cal-presets">
-                <button type="button" class="ig-saver-cal-preset-btn" data-preset="today">Hoje</button>
-                <button type="button" class="ig-saver-cal-preset-btn" data-preset="yesterday">Ontem</button>
-                <button type="button" class="ig-saver-cal-preset-btn" data-preset="last7">7 dias</button>
-                <button type="button" class="ig-saver-cal-preset-btn" data-preset="last30">30 dias</button>
-                <button type="button" class="ig-saver-cal-preset-btn" data-preset="thisMonth">Este Mês</button>
-                <button type="button" class="ig-saver-cal-preset-btn" data-preset="lastMonth">Mês Passado</button>
-              </div>
-
-              <!-- Calendar Navigation Header -->
-              <div class="ig-saver-cal-header">
-                <button type="button" class="ig-saver-cal-nav-btn" id="ig-saver-cal-prev" title="Mês anterior">
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
-                </button>
-                <span class="ig-saver-cal-month-title" id="ig-saver-cal-month-title">Agosto de 2026</span>
-                <button type="button" class="ig-saver-cal-nav-btn" id="ig-saver-cal-next" title="Próximo mês">
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
-                </button>
-              </div>
-
-              <!-- Weekdays Header -->
-              <div class="ig-saver-cal-weekdays">
-                <span>DOM</span>
-                <span>SEG</span>
-                <span>TER</span>
-                <span>QUA</span>
-                <span>QUI</span>
-                <span>SEX</span>
-                <span>SÁB</span>
-              </div>
-
-              <!-- Month Grid (42 cells: 6 rows x 7 cols) -->
-              <div class="ig-saver-cal-grid" id="ig-saver-cal-grid"></div>
-
-              <!-- Footer info & action buttons -->
-              <div class="ig-saver-cal-footer">
-                <div class="ig-saver-cal-info">
-                  <span id="ig-saver-cal-info-text">Selecione a data inicial</span>
-                </div>
-                <div class="ig-saver-cal-actions">
-                  <button type="button" class="ig-saver-cal-btn-clear" id="ig-saver-cal-clear">Limpar</button>
-                  <button type="button" class="ig-saver-cal-btn-cancel" id="ig-saver-cal-cancel">Cancelar</button>
-                  <button type="button" class="ig-saver-cal-btn-apply" id="ig-saver-cal-apply">Aplicar</button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
+      <input type="hidden" id="ig-saver-from" value="">
+      <input type="hidden" id="ig-saver-to" value="">
 
         <div style="margin-top: 10px;">
           <button type="button" id="ig-saver-filters-trigger" class="ig-saver-filters-trigger-btn">
-            <span style="font-size: 12.5px; font-weight: 600; color: #1d1d1f;">🔍 ${_("dialog_filter_title") || "Filtros de Conteúdo (Opcional)"}</span>
+            <span style="font-size: 12.5px; font-weight: 600; color: #1d1d1f;">${_("dialog_filter_title") || "Filtros"}</span>
             <span id="ig-saver-active-filters-badge" class="ig-saver-filter-count-badge">0 ativos</span>
           </button>
         </div>
-      </div>
-
       <div style="display: flex; gap: 10px; margin-top: 14px;">
-        <button id="ig-saver-start" class="ig-saver-btn-primary">${_("dialog_btn_start")}</button>
-        <button id="ig-saver-cancel" class="ig-saver-btn-secondary">${_("dialog_btn_cancel")}</button>
-      </div>
-    </div>
-
-    <!-- Step 2: Confirmation Screen -->
-    <div id="ig-saver-step2-view" style="display: none;">
-      <h2 style="margin: 0 0 16px; font-size: 18px; color: var(--ig-text); font-weight: 700; display: flex; align-items: center; gap: 8px;">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#FD1D1D"
-             stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="10"/>
-          <polyline points="12 6 12 12 16 14"/>
-        </svg>
-        <span>${_("dialog_confirm_title") || "Confirmar Download"}</span>
-      </h2>
-      
-      <div class="ig-saver-confirm-summary">
-        <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--ig-text-sec); letter-spacing: 0.8px; margin-bottom: 14px;">
-          ${_("dialog_confirm_summary") || "Resumo da Configuração"}
-        </div>
-        <div class="ig-saver-confirm-item">
-          <span class="ig-saver-confirm-label">${_("dialog_confirm_target") || "Perfil:"}</span>
-          <span class="ig-saver-confirm-value" id="ig-saver-confirm-val-target">-</span>
-        </div>
-        <div class="ig-saver-confirm-item">
-          <span class="ig-saver-confirm-label">${_("dialog_confirm_media") || "Tipo de Mídia:"}</span>
-          <span class="ig-saver-confirm-value" id="ig-saver-confirm-val-media">Tudo</span>
-        </div>
-        <div class="ig-saver-confirm-item" style="display: none;">
-          <span class="ig-saver-confirm-label">${_("dialog_confirm_save") || "Método:"}</span>
-          <span class="ig-saver-confirm-value" id="ig-saver-confirm-val-save">Flat</span>
-        </div>
-        <div class="ig-saver-confirm-item">
-          <span class="ig-saver-confirm-label">${_("dialog_confirm_filters") || "Filtros:"}</span>
-          <span class="ig-saver-confirm-value" id="ig-saver-confirm-val-filters">Nenhum</span>
-        </div>
-        <div class="ig-saver-confirm-item" style="border-top: 1px solid var(--ig-border); padding-top: 10px; margin-top: 10px;">
-          <span class="ig-saver-confirm-label">${_("dialog_confirm_est") || "Saída Estimada:"}</span>
-          <span class="ig-saver-confirm-value" id="ig-saver-confirm-val-est" style="color: #FD1D1D; font-weight: 700;">-</span>
-        </div>
-      </div>
-      
-      <div style="display: flex; gap: 10px; margin-top: 10px;">
-        <button id="ig-saver-confirm-btn" class="ig-saver-btn-primary">${_("dialog_btn_confirm") || "Confirmar e Baixar"}</button>
-        <button id="ig-saver-back-btn" class="ig-saver-btn-secondary">${_("dialog_btn_back") || "Voltar"}</button>
+        <button id="ig-saver-start" class="ig-saver-btn-primary">${_("dialog_btn_start") || "Iniciar download"}</button>
+        <button id="ig-saver-cancel" class="ig-saver-btn-secondary">Cancelar</button>
       </div>
     </div>
     `;
-    t.appendChild(n);
+    let modalRow = document.createElement("div");
+    modalRow.id = "ig-saver-modal-row";
+    modalRow.className = "ig-saver-modal-row";
+    modalRow.appendChild(n);
 
     let flyout = document.createElement("div");
     flyout.id = "ig-saver-filters-flyout";
     flyout.className = "ig-saver-filters-flyout";
     flyout.innerHTML = `
       <div class="ig-saver-flyout-header">
-        <div style="display: flex; align-items: center; gap: 8px;">
-          <span style="font-size: 13.5px; font-weight: 700; color: #1d1d1f;">🔍 Filtros de Conteúdo</span>
-          <button type="button" id="ig-saver-clean-filters-btn" class="ig-saver-clean-filters-pill" style="display: none;">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 6h18"/>
-              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-            </svg>
-            <span>Limpar</span>
-          </button>
-        </div>
+        <span style="font-size: 14px; font-weight: 700; color: #1d1d1f;">Filtros</span>
         <button type="button" id="ig-saver-flyout-close" class="ig-saver-flyout-close-btn">&times;</button>
       </div>
-      <div style="display: flex; flex-direction: column; gap: 12px;">
+      <div class="ig-saver-flyout-fields">
         <div>
           <label style="${r}">${_("dialog_filter_hashtag")}</label>
           <input type="text" id="ig-saver-filter-hashtag" placeholder="ex: #surf" class="ig-saver-field">
@@ -11665,23 +12220,23 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
             <button type="button" id="ig-saver-comments-inc" class="ig-saver-stepper-btn">+</button>
           </div>
         </div>
-        <div>
-          <label style="${r}">${_("dialog_filter_saves")}</label>
-          <div class="ig-saver-stepper">
-            <button type="button" id="ig-saver-saves-dec" class="ig-saver-stepper-btn">&minus;</button>
-            <input type="number" inputmode="numeric" id="ig-saver-filter-saves" min="0" placeholder="ex: 50" class="ig-saver-stepper-input">
-            <button type="button" id="ig-saver-saves-inc" class="ig-saver-stepper-btn">+</button>
-          </div>
-        </div>
+
+      </div>
+      <div class="ig-saver-flyout-footer">
+        <button type="button" id="ig-saver-apply-filters-btn" class="ig-saver-flyout-apply-btn">Aplicar Filtros</button>
+        <button type="button" id="ig-saver-clean-filters-footer-btn" class="ig-saver-flyout-clean-btn">Limpar</button>
       </div>
     `;
-    t.appendChild(flyout);
+    modalRow.appendChild(flyout);
+    t.appendChild(modalRow);
     document.body.appendChild(t);
 
     // Filters Flyout Trigger & Close
     let filtersTrigger = document.getElementById("ig-saver-filters-trigger");
     let filtersFlyout = document.getElementById("ig-saver-filters-flyout");
     let flyoutClose = document.getElementById("ig-saver-flyout-close");
+    let applyFiltersBtn = document.getElementById("ig-saver-apply-filters-btn");
+    let cleanFiltersFooterBtn = document.getElementById("ig-saver-clean-filters-footer-btn");
 
     if (filtersTrigger && filtersFlyout) {
       filtersTrigger.addEventListener("click", (evt) => {
@@ -11699,6 +12254,25 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
           filtersTrigger.classList.remove("is-active");
         });
       }
+
+      if (applyFiltersBtn) {
+        applyFiltersBtn.addEventListener("click", (evt) => {
+          evt.preventDefault();
+          evt.stopPropagation();
+          updateActiveFiltersBadge();
+          updateEstimatePreview();
+          filtersFlyout.classList.remove("is-open");
+          filtersTrigger.classList.remove("is-active");
+        });
+      }
+
+      if (cleanFiltersFooterBtn) {
+        cleanFiltersFooterBtn.addEventListener("click", (evt) => {
+          evt.preventDefault();
+          evt.stopPropagation();
+          clearAllFilters();
+        });
+      }
     }
 
     // Connect toggle rows to checkboxes for better touch areas
@@ -11714,8 +12288,6 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         });
       }
     }
-    setupToggleRowClick("ig-saver-toggle-stories-row", "ig-saver-include-stories");
-    setupToggleRowClick("ig-saver-toggle-highlights-row", "ig-saver-include-highlights");
     setupToggleRowClick("ig-saver-only-new-row", "ig-saver-only-new-toggle");
 
     // Filter Badges & Estimate Helpers
@@ -11728,14 +12300,11 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       let likes = parseInt(document.getElementById("ig-saver-filter-likes")?.value, 10) || 0;
       let views = parseInt(document.getElementById("ig-saver-filter-views")?.value, 10) || 0;
       let comments = parseInt(document.getElementById("ig-saver-filter-comments")?.value, 10) || 0;
-      let saves = parseInt(document.getElementById("ig-saver-filter-saves")?.value, 10) || 0;
-
       let count = 0;
       if (hashtag.length > 0) count++;
       if (likes > 0) count++;
       if (views > 0) count++;
       if (comments > 0) count++;
-      if (saves > 0) count++;
 
       if (badge) {
         badge.textContent = `${count} ativo${count === 1 ? "" : "s"}`;
@@ -11757,8 +12326,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         "ig-saver-filter-hashtag",
         "ig-saver-filter-likes",
         "ig-saver-filter-views",
-        "ig-saver-filter-comments",
-        "ig-saver-filter-saves"
+        "ig-saver-filter-comments"
       ];
       ids.forEach(id => {
         let el = document.getElementById(id);
@@ -11819,7 +12387,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         if (match) {
           let numStr = match[1].replace(/\./g, "").replace(/,/g, "");
           let parsed = parseInt(numStr, 10);
-          if (!isNaN(parsed) && parsed > 0) {
+          if (!isNaN(parsed) && parsed > 0 && parsed < 100000000) {
             postCount = parsed;
             postCountText = `${match[1]} posts`;
           }
@@ -11832,7 +12400,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         if (descMatch) {
           postCountText = `${descMatch[1]} posts`;
           let cleanNum = parseInt(descMatch[1].replace(/\./g, "").replace(/,/g, ""), 10);
-          if (!isNaN(cleanNum)) postCount = cleanNum;
+          if (!isNaN(cleanNum) && cleanNum > 0 && cleanNum < 100000000) postCount = cleanNum;
         }
       }
 
@@ -11854,11 +12422,40 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       };
     }
 
+    function parseISO(str) {
+      if (!str) return null;
+      let parts = str.split("-").map(Number);
+      if (parts.length !== 3) return null;
+      return new Date(parts[0], parts[1] - 1, parts[2]);
+    }
+
+    function toISO(d) {
+      if (!d) return "";
+      let y = d.getFullYear();
+      let m = String(d.getMonth() + 1).padStart(2, "0");
+      let day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    }
+
+    function formatDisplayBR(isoStr) {
+      if (!isoStr) return "";
+      let parts = isoStr.split("-");
+      if (parts.length !== 3) return isoStr;
+      return `${parts[2]}/${parts[1]}/${parts[0]}`;
+    }
+
     let currentProfileData = extractProfileData(a);
 
-    function renderProfileCard() {
+    async function renderProfileCard() {
       let container = document.getElementById("ig-saver-profile-card-container");
       if (!container) return;
+
+      let isFav = false;
+      try {
+        let favRes = await chrome.storage.local.get("ig_saver_favorites");
+        let favList = Array.isArray(favRes?.ig_saver_favorites) ? favRes.ig_saver_favorites : [];
+        isFav = favList.includes(currentProfileData.username.toLowerCase());
+      } catch {}
 
       container.innerHTML = `
         <div class="ig-saver-profile-card">
@@ -11869,54 +12466,43 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
           </div>
           <div class="ig-saver-profile-meta-wrap">
             <div class="ig-saver-profile-posts" id="ig-saver-profile-posts-badge">${currentProfileData.postCountText}</div>
-            <div class="ig-saver-profile-sub" id="ig-saver-profile-est-badge">${currentProfileData.estTimeText}</div>
           </div>
+          <button type="button" id="ig-saver-profile-favorite-btn" class="ig-saver-profile-favorite-btn ${isFav ? 'active' : ''}" title="${isFav ? 'Remover dos favoritos' : 'Favoritar perfil'}">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+          </button>
         </div>
       `;
+
+      let favBtn = document.getElementById("ig-saver-profile-favorite-btn");
+      if (favBtn) {
+        favBtn.addEventListener("click", async (evt) => {
+          evt.preventDefault();
+          evt.stopPropagation();
+          try {
+            let favRes = await chrome.storage.local.get("ig_saver_favorites");
+            let favList = Array.isArray(favRes?.ig_saver_favorites) ? favRes.ig_saver_favorites : [];
+            let target = currentProfileData.username.toLowerCase();
+            let idx = favList.indexOf(target);
+            if (idx >= 0) {
+              favList.splice(idx, 1);
+              favBtn.classList.remove("active");
+              favBtn.title = "Favoritar perfil";
+            } else {
+              favList.push(target);
+              favBtn.classList.add("active");
+              favBtn.title = "Remover dos favoritos";
+            }
+            await chrome.storage.local.set({ ig_saver_favorites: favList });
+          } catch (err) {
+            console.warn("[ig-saver] Erro ao salvar favoritos:", err);
+          }
+        });
+      }
     }
 
     renderProfileCard();
 
-    function updateEstimatePreview() {
-      let estEl = document.getElementById("ig-saver-confirm-val-est");
-      let postsBadge = document.getElementById("ig-saver-profile-posts-badge");
-      let estBadge = document.getElementById("ig-saver-profile-est-badge");
-      
-      let strategy = document.getElementById("ig-saver-strategy")?.value || "all";
-      let filterVal = document.getElementById("ig-saver-filter")?.value || "all";
-      
-      let targetCount = currentProfileData.postCount;
-      let countText = currentProfileData.postCountText;
-      
-      if (strategy === "topk") {
-        let k = parseInt(document.getElementById("ig-saver-topk-value")?.value, 10) || 20;
-        targetCount = k;
-        countText = `${k} posts`;
-      } else if (strategy === "range") {
-        let from = document.getElementById("ig-saver-from")?.value;
-        let to = document.getElementById("ig-saver-to")?.value;
-        if (from && to) {
-          countText = `${formatDisplayBR(from)} a ${formatDisplayBR(to)}`;
-        } else if (from) {
-          countText = `A partir de ${formatDisplayBR(from)}`;
-        } else {
-          countText = "Período selecionado";
-        }
-      }
-
-      if (filterVal === "photos") {
-        countText += " (Fotos)";
-      } else if (filterVal === "videos") {
-        countText += " (Vídeos)";
-      }
-
-      let estSecs = targetCount > 0 ? Math.max(5, Math.ceil(targetCount * 0.35)) : 30;
-      let estTimeText = estSecs < 60 ? `~${estSecs}s` : `~${Math.ceil(estSecs / 60)} min`;
-
-      if (postsBadge) postsBadge.textContent = countText;
-      if (estBadge) estBadge.textContent = estTimeText;
-      if (estEl) estEl.textContent = `${estTimeText} (${countText})`;
-    }
+    function updateEstimatePreview() {}
 
     function runValidation(val) {}
     function checkOnlyNewMode(val) {}
@@ -11934,8 +12520,7 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
     // Hook up active filters change observers
     let filterInputs = [
       "ig-saver-filter-hashtag", "ig-saver-filter-likes", 
-      "ig-saver-filter-views", "ig-saver-filter-comments", 
-      "ig-saver-filter-saves"
+      "ig-saver-filter-views", "ig-saver-filter-comments"
     ];
     for (let fid of filterInputs) {
       let el = document.getElementById(fid);
@@ -11967,16 +12552,42 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       });
     }
 
+    // Segmented Control for Strategy / Quantity (Tudo / Definir quantidade)
+    let strategySegmentGroup = document.getElementById("ig-saver-strategy-segmented");
+    let strategyHiddenInput = document.getElementById("ig-saver-strategy");
+    let quantityStepperWrap = document.getElementById("ig-saver-quantity-stepper-wrap");
+    let quantityInput = document.getElementById("ig-saver-quantity-input");
+    if (strategySegmentGroup && strategyHiddenInput) {
+      let buttons = strategySegmentGroup.querySelectorAll(".ig-saver-segment-btn");
+      buttons.forEach(btn => {
+        btn.addEventListener("click", () => {
+          buttons.forEach(b => b.classList.remove("active"));
+          btn.classList.add("active");
+          let val = btn.getAttribute("data-value");
+          strategyHiddenInput.value = val;
+          if (val === "topk") {
+            if (quantityStepperWrap) quantityStepperWrap.style.display = "block";
+            if (quantityInput && (!quantityInput.value || parseInt(quantityInput.value, 10) < 1)) {
+              quantityInput.value = "50";
+            }
+          } else {
+            if (quantityStepperWrap) quantityStepperWrap.style.display = "none";
+          }
+          updateEstimatePreview();
+        });
+      });
+    }
+
     // Helper for Stepper Numeric Controls
-    function setupNumericStepper(inputId, decBtnId, incBtnId, step = 100) {
+    function setupNumericStepper(inputId, decBtnId, incBtnId, step = 100, minVal = 0) {
       let input = document.getElementById(inputId);
       let dec = document.getElementById(decBtnId);
       let inc = document.getElementById(incBtnId);
       if (input && dec && inc) {
         dec.addEventListener("click", () => {
           let curr = parseInt(input.value, 10) || 0;
-          input.value = curr > 0 ? String(Math.max(0, curr - step)) : "";
-          if (input.value === "0") input.value = "";
+          let nextVal = Math.max(minVal, curr - step);
+          input.value = (inputId === "ig-saver-quantity-input" || nextVal > 0) ? String(nextVal) : "";
           input.dispatchEvent(new Event("input", { bubbles: true }));
           input.dispatchEvent(new Event("change", { bubbles: true }));
           updateActiveFiltersBadge();
@@ -11984,7 +12595,8 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         });
         inc.addEventListener("click", () => {
           let curr = parseInt(input.value, 10) || 0;
-          input.value = String(curr + step);
+          let nextVal = curr + step;
+          input.value = String(nextVal);
           input.dispatchEvent(new Event("input", { bubbles: true }));
           input.dispatchEvent(new Event("change", { bubbles: true }));
           updateActiveFiltersBadge();
@@ -11992,10 +12604,10 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         });
       }
     }
+    setupNumericStepper("ig-saver-quantity-input", "ig-saver-quantity-dec", "ig-saver-quantity-inc", 10, 0);
     setupNumericStepper("ig-saver-filter-likes", "ig-saver-likes-dec", "ig-saver-likes-inc", 500);
     setupNumericStepper("ig-saver-filter-views", "ig-saver-views-dec", "ig-saver-views-inc", 1000);
     setupNumericStepper("ig-saver-filter-comments", "ig-saver-comments-dec", "ig-saver-comments-inc", 50);
-    setupNumericStepper("ig-saver-filter-saves", "ig-saver-saves-dec", "ig-saver-saves-inc", 25);
 
     // Debounced Validation for Single Profile Input
     let singleInput = document.getElementById("ig-saver-singleprofile-input");
@@ -12101,28 +12713,6 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
       ];
 
-      function parseISO(str) {
-        if (!str) return null;
-        let parts = str.split("-").map(Number);
-        if (parts.length !== 3) return null;
-        return new Date(parts[0], parts[1] - 1, parts[2]);
-      }
-
-      function toISO(d) {
-        if (!d) return "";
-        let y = d.getFullYear();
-        let m = String(d.getMonth() + 1).padStart(2, "0");
-        let day = String(d.getDate()).padStart(2, "0");
-        return `${y}-${m}-${day}`;
-      }
-
-      function formatDisplayBR(isoStr) {
-        if (!isoStr) return "";
-        let parts = isoStr.split("-");
-        if (parts.length !== 3) return isoStr;
-        return `${parts[2]}/${parts[1]}/${parts[0]}`;
-      }
-
       let now = new Date();
       let todayISO = toISO(now);
       let viewYear = now.getFullYear();
@@ -12224,23 +12814,16 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         let daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
         let daysInPrevMonth = new Date(viewYear, viewMonth, 0).getDate();
 
-        // 42 cells (6 weeks x 7 days)
         let cells = [];
-
-        // Previous month trailing days
         for (let i = startDayOfWeek - 1; i >= 0; i--) {
           let dayNum = daysInPrevMonth - i;
           let d = new Date(viewYear, viewMonth - 1, dayNum);
           cells.push({ date: d, otherMonth: true });
         }
-
-        // Current month days
         for (let dayNum = 1; dayNum <= daysInMonth; dayNum++) {
           let d = new Date(viewYear, viewMonth, dayNum);
           cells.push({ date: d, otherMonth: false });
         }
-
-        // Next month leading days
         let remaining = 42 - cells.length;
         for (let dayNum = 1; dayNum <= remaining; dayNum++) {
           let d = new Date(viewYear, viewMonth + 1, dayNum);
@@ -12291,7 +12874,6 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
                 hoverDate = null;
               }
 
-              // Remove active preset highlight if manual click
               if (calPresets) {
                 calPresets.querySelectorAll(".ig-saver-cal-preset-btn").forEach(b => b.classList.remove("active"));
               }
@@ -12306,7 +12888,6 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         updateCalendarSelection();
       }
 
-      // Presets logic
       if (calPresets) {
         calPresets.querySelectorAll(".ig-saver-cal-preset-btn").forEach(btn => {
           btn.addEventListener("click", (evt) => {
@@ -12348,7 +12929,6 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         });
       }
 
-      // Prev & Next navigation
       if (calPrevBtn) {
         calPrevBtn.addEventListener("click", (evt) => {
           evt.preventDefault();
@@ -12384,7 +12964,6 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         });
       }
 
-      // Trigger Toggle (Always Opens Upwards, 100% visible)
       dateRangeTrigger.addEventListener("click", (evt) => {
         evt.preventDefault();
         evt.stopPropagation();
@@ -12412,7 +12991,6 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         }
       });
 
-      // Clear button
       if (calClearBtn) {
         calClearBtn.addEventListener("click", (evt) => {
           evt.preventDefault();
@@ -12432,7 +13010,6 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         });
       }
 
-      // Cancel button
       if (calCancelBtn) {
         calCancelBtn.addEventListener("click", (evt) => {
           evt.preventDefault();
@@ -12444,7 +13021,6 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         });
       }
 
-      // Apply button
       if (calApplyBtn) {
         calApplyBtn.addEventListener("click", (evt) => {
           evt.preventDefault();
@@ -12461,22 +13037,22 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         });
       }
 
-      // Close on click outside
       window.addEventListener("click", (evt) => {
         if (!dateRangePicker.contains(evt.target)) {
           dateRangePicker.classList.remove("is-open");
         }
       });
 
-      // Initial display update
       updateTriggerDisplay();
     }
 
     // Estimate Preview Hookups
     updateEstimatePreview();
+    document.getElementById("ig-saver-quantity-input")?.addEventListener("input", updateEstimatePreview);
     document.getElementById("ig-saver-topk-value")?.addEventListener("input", updateEstimatePreview);
     document.getElementById("ig-saver-from")?.addEventListener("change", updateEstimatePreview);
     document.getElementById("ig-saver-to")?.addEventListener("change", updateEstimatePreview);
+
 
     function f() {
       ((n.style.transform = "scale(0.95) translateY(8px)"),
@@ -12485,139 +13061,90 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         setTimeout(() => t.remove(), 200));
     }
 
-    document.getElementById("ig-saver-cancel").addEventListener("click", f);
+    let startBtn = document.getElementById("ig-saver-start");
+    let cancelBtn = document.getElementById("ig-saver-cancel");
+
+    if (cancelBtn) {
+      cancelBtn.addEventListener("click", () => {
+        if (activeScrollScanState) {
+          activeScrollScanState.aborted = true;
+          activeScrollScanState = null;
+        }
+        f();
+      });
+    }
+
     t.addEventListener("click", (h) => {
-      h.target === t && f();
+      if (h.target === t) f();
     });
 
-    // Step 1 -> Step 2 transition
-    let startBtn = document.getElementById("ig-saver-start");
     if (startBtn) {
-      startBtn.addEventListener("click", () => {
-        let targetUser = "@" + (document.getElementById("ig-saver-singleprofile-input")?.value || "").trim().replace(/^@/, "");
-        if (targetUser === "@") {
-          alert("Por favor, digite o nome do perfil.");
-          return;
-        }
-
-        document.getElementById("ig-saver-confirm-val-target").textContent = targetUser;
-        
-        let filterVal = document.getElementById("ig-saver-filter").value;
-        let filterText = filterVal === "all" ? _("dialog_media_all") : (filterVal === "photos" ? _("dialog_media_photos") : _("dialog_media_videos"));
-        document.getElementById("ig-saver-confirm-val-media").textContent = filterText;
-        
-        let saveVal = document.getElementById("ig-saver-folder-mode").value;
-        let saveText = saveVal === "flat" ? _("dialog_save_flat") : _("dialog_save_grouped");
-        document.getElementById("ig-saver-confirm-val-save").textContent = saveText;
-        
-        let activeFiltersCount = updateActiveFiltersBadge();
-        let activeText = activeFiltersCount > 0 ? `${activeFiltersCount} ativo${activeFiltersCount === 1 ? "" : "s"}` : "Nenhum";
-        document.getElementById("ig-saver-confirm-val-filters").textContent = activeText;
-        
-        updateEstimatePreview();
-        
-        document.getElementById("ig-saver-step1-view").style.display = "none";
-        document.getElementById("ig-saver-step2-view").style.display = "block";
-      });
-    }
-
-    // Step 2 buttons
-    let backBtn = document.getElementById("ig-saver-back-btn");
-    if (backBtn) {
-      backBtn.addEventListener("click", () => {
-        document.getElementById("ig-saver-step2-view").style.display = "none";
-        document.getElementById("ig-saver-step1-view").style.display = "block";
-      });
-    }
-
-    let confirmBtn = document.getElementById("ig-saver-confirm-btn");
-    if (confirmBtn) {
-      confirmBtn.addEventListener("click", () => {
-        confirmBtn.disabled = true;
-        if (backBtn) backBtn.disabled = true;
-        confirmBtn.innerHTML = `<div class="ig-saver-spinner"></div> ${_("dialog_status_preparing") || "Preparando..."}`;
-
-        let h = document.getElementById("ig-saver-filter").value,
-          y = d.value,
-          S = { mode: "all", fromTs: null, toTs: null, nDays: null },
-          E = 0;
-        let minLikes = parseInt(document.getElementById("ig-saver-filter-likes")?.value, 10) || 0;
-        let minViews = parseInt(document.getElementById("ig-saver-filter-views")?.value, 10) || 0;
-        let minComments = parseInt(document.getElementById("ig-saver-filter-comments")?.value, 10) || 0;
-        let minSaves = parseInt(document.getElementById("ig-saver-filter-saves")?.value, 10) || 0;
-        let hashtag = document.getElementById("ig-saver-filter-hashtag")?.value || "";
-        
-        if (y === "topk")
-          E = Math.max(
-            1,
-            parseInt(document.getElementById("ig-saver-topk-value").value) ||
-              1,
-          );
-        else if (y === "lastNDays") {
-          let x = parseInt(document.getElementById("ig-saver-ndays").value);
-          S = {
-            mode: "lastNDays",
-            fromTs: Math.floor((Date.now() - x * 864e5) / 1e3),
-            toTs: null,
-            nDays: x,
-          };
-        } else if (y === "range") {
-          let x = document.getElementById("ig-saver-from").value,
-            T = document.getElementById("ig-saver-to").value,
-            V = x
-              ? Math.floor(new Date(x + "T00:00:00").getTime() / 1e3)
-              : null,
-            $e = T
-              ? Math.floor(new Date(T + "T23:59:59").getTime() / 1e3)
-              : null;
-          S = { mode: "range", fromTs: V, toTs: $e, nDays: null };
-        }
-
-        let onlyNewActive = document.getElementById("ig-saver-only-new-toggle")?.checked;
-        if (onlyNewActive) {
-          let lastTs = parseInt(document.getElementById("ig-saver-only-new-row")?.getAttribute("data-timestamp"), 10);
-          if (lastTs) {
-            S = { mode: "range", fromTs: lastTs, toTs: null, nDays: null };
+      startBtn.addEventListener("click", async () => {
+        try {
+          let username = (document.getElementById("ig-saver-singleprofile-input")?.value || a || O()).trim().replace(/^@/, "");
+          if (!username) {
+            alert("Por favor, digite ou selecione um perfil.");
+            return;
           }
-        }
 
-        let I = true, // Force flat folder mode (always download all files in one folder)
-          v =
-            !re() &&
-            document.getElementById("ig-saver-include-highlights")
-              ?.checked === !0,
-          k =
-            !re() &&
-            document.getElementById("ig-saver-include-stories")?.checked ===
-              !0,
-          A = re() ? "reels" : "profile";
-
-        (async () => {
-          if (v) {
-            let T = await xe();
-            if (!Se(T)) {
-              Z({ reason: "extras", getTheme: L });
-              f();
-              return;
+          let h = document.getElementById("ig-saver-filter")?.value || "all";
+          let strategyEl = document.getElementById("ig-saver-strategy");
+          let y = strategyEl ? strategyEl.value : "all";
+          let S = { mode: "all", fromTs: null, toTs: null, nDays: null };
+          let E = 0;
+          let minLikes = parseInt(document.getElementById("ig-saver-filter-likes")?.value, 10) || 0;
+          let minViews = parseInt(document.getElementById("ig-saver-filter-views")?.value, 10) || 0;
+          let minComments = parseInt(document.getElementById("ig-saver-filter-comments")?.value, 10) || 0;
+          let minSaves = 0;
+          let hashtag = document.getElementById("ig-saver-filter-hashtag")?.value || "";
+          
+          let isOnlyExtras = false;
+          if (y === "topk") {
+            let inputQtyStr = document.getElementById("ig-saver-quantity-input")?.value?.trim();
+            let parsedQty = parseInt(inputQtyStr, 10);
+            E = Math.max(1, parsedQty || 50);
+          } else if (y === "lastNDays") {
+            let x = parseInt(document.getElementById("ig-saver-ndays")?.value, 10) || 7;
+            S = {
+              mode: "lastNDays",
+              fromTs: Math.floor((Date.now() - x * 864e5) / 1e3),
+              toTs: null,
+              nDays: x,
+            };
+          } else if (y === "range") {
+            let x = document.getElementById("ig-saver-from")?.value,
+              T = document.getElementById("ig-saver-to")?.value,
+              V = x ? Math.floor(new Date(x + "T00:00:00").getTime() / 1e3) : null,
+              $e = T ? Math.floor(new Date(T + "T23:59:59").getTime() / 1e3) : null;
+            if (V && $e && V > $e) {
+              let tmp = V;
+              V = $e;
+              $e = tmp;
+            }
+            if (V || $e) {
+              S = { mode: "range", fromTs: V, toTs: $e, nDays: null };
+            } else {
+              S = { mode: "all", fromTs: null, toTs: null, nDays: null };
             }
           }
-          
-          setTimeout(async () => {
-            f();
-            let username = (document.getElementById("ig-saver-singleprofile-input")?.value || "").trim().replace(/^@/, "");
 
-            saveToHistory([username]);
+          let I = true; // Flat folder
+          let A = (re() || h === "videos") ? "reels" : "profile";
 
-            let x = await an(username, h, S, E, I, A, minLikes, minViews, minComments, hashtag, minSaves);
-            x &&
-              (v || k) &&
-              B.set(x, {
-                username: username,
-                includeHighlights: v,
-                includeStories: k,
-              });
-          }, 600);
-        })();
+          // Se escolheu 'Apenas vídeos' e está na grade do feed, aciona a navegação direta para a aba de Reels do perfil
+          if (h === "videos" && !window.location.pathname.includes("/reels/")) {
+            switchToProfileReelsTab(username);
+          }
+
+          saveToHistory([username]);
+
+          f(); // Fecha o modal central imediatamente
+
+          let taskId = await an(username, h, S, E, I, A, minLikes, minViews, minComments, hashtag, minSaves, isOnlyExtras);
+        } catch (err) {
+          console.error("[ig-saver] Erro ao disparar download:", err);
+          m("Erro ao iniciar download: " + (err.message || err), "error");
+        }
       });
     }
 
@@ -12867,11 +13394,12 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
         let failedEl = document.getElementById("ig-saver-status-failed");
         let btnPauseText = document.getElementById("ig-saver-btn-pause-text");
         let btnPauseIcon = document.getElementById("ig-saver-btn-pause-icon");
+        let liveDot = document.getElementById("ig-saver-live-dot");
 
         if (!task) {
           clearInterval(progressInterval);
           progressInterval = null;
-          if (statusTextEl) statusTextEl.textContent = _("status_stopped");
+          if (statusTextEl) statusTextEl.textContent = _("status_stopped") || "Download finalizado";
           setTimeout(Q, 2000);
           return;
         }
@@ -12880,38 +13408,53 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
           if (task.status === "paused") {
             btnPauseText.textContent = "Retomar";
             btnPauseIcon.innerHTML = `<polygon points="5 3 19 12 5 21 5 3" fill="currentColor"></polygon>`;
+            if (liveDot) liveDot.style.background = "#FCB045";
           } else {
             btnPauseText.textContent = "Pausar";
             btnPauseIcon.innerHTML = `<rect x="6" y="4" width="4" height="16" fill="currentColor"></rect><rect x="14" y="4" width="4" height="16" fill="currentColor"></rect>`;
+            if (liveDot) liveDot.style.background = "#00BA88";
           }
         }
 
         if (task.status === "done") {
+          if (activeScrollScanState) {
+            activeScrollScanState.aborted = true;
+            activeScrollScanState = null;
+          }
           clearInterval(progressInterval);
           progressInterval = null;
-          if (statusTextEl) statusTextEl.textContent = _("status_scan_complete");
+          if (statusTextEl) statusTextEl.textContent = _("status_scan_complete") || "Download concluído!";
           if (progressBar) progressBar.style.width = "100%";
           if (statusCountEl) {
             let skipped = task.totalMediaSkippedDuplicates || 0;
             statusCountEl.textContent = `${task.totalMediaDownloaded || 0} baixados, ${task.totalMediaFailed || 0} falharam${skipped ? `, ${skipped} duplicados pulados` : ""}`;
           }
           if (timeEl) timeEl.textContent = "Concluído!";
+
           setTimeout(Q, 4000);
           return;
         }
 
         if (task.status === "stopped") {
+          if (activeScrollScanState) {
+            activeScrollScanState.aborted = true;
+            activeScrollScanState = null;
+          }
           clearInterval(progressInterval);
           progressInterval = null;
-          if (statusTextEl) statusTextEl.textContent = _("status_stopped");
+          if (statusTextEl) statusTextEl.textContent = _("status_stopped") || "Interrompido";
           setTimeout(Q, 2000);
           return;
         }
 
         if (task.status === "error") {
+          if (activeScrollScanState) {
+            activeScrollScanState.aborted = true;
+            activeScrollScanState = null;
+          }
           clearInterval(progressInterval);
           progressInterval = null;
-          if (statusTextEl) statusTextEl.textContent = "Erro!";
+          if (statusTextEl) statusTextEl.textContent = "Erro no download";
           setTimeout(Q, 3000);
           return;
         }
@@ -12929,8 +13472,8 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
             let total = task.totalMediaFound || 0;
             let downloaded = task.totalMediaDownloaded + (task.zipBuilding.current || 0);
             if (downloaded > total) downloaded = total;
-
             let percent = total > 0 ? Math.round((downloaded / total) * 100) : 0;
+
             if (statusTextEl) statusTextEl.textContent = "Baixando mídias...";
             if (statusCountEl) statusCountEl.textContent = `${downloaded} / ${total} arquivos (${percent}%)`;
             if (progressBar) progressBar.style.width = `${percent}%`;
@@ -12954,13 +13497,19 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
             }
           }
         } else {
-          if (progressContainer) progressContainer.style.display = "none";
           if (timeEl) timeEl.textContent = "";
 
           if (task.status === "paused") {
             if (statusTextEl) statusTextEl.textContent = "Pausado";
+          } else if (task.message) {
+            if (statusTextEl) statusTextEl.textContent = task.message;
+          } else if (task.seenPostCount > 0) {
+            let msg = `Capturando mídias (${task.seenPostCount} publicações)...`;
+            if (statusTextEl) statusTextEl.textContent = msg;
           } else {
-            if (statusTextEl) statusTextEl.textContent = "Escaneando perfil...";
+            if (statusTextEl && (!statusTextEl.textContent || statusTextEl.textContent === "Escaneando perfil...")) {
+              statusTextEl.textContent = "Conectando e escaneando...";
+            }
           }
 
           if (statusCountEl) {
@@ -12986,10 +13535,10 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       } finally {
         progressPollPending = false;
       }
-    }, 1000);
+    }, 1500);
   }
 
-  function he(i, e) {
+  function he(i, e, profilePicUrl) {
     H = i;
     if (downloadState.taskId !== i) {
       downloadState = { startTime: null, taskId: i, startDownloaded: 0 };
@@ -12997,55 +13546,62 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
 
     let t = document.getElementById("ig-saver-status");
     if (t) {
-      startProgressPolling(i, e);
+      t.style.display = "block";
+      t.style.opacity = "1";
+      t.style.transform = "translateY(0)";
+      t.style.zIndex = "9999999";
+      if (i && !i.startsWith("task_init")) startProgressPolling(i, e);
       return;
     }
 
     let n = L(),
       a = document.createElement("div");
+
     ((a.id = "ig-saver-status"),
       (a.style.cssText = `
-    position: fixed; top: 70px; right: 20px; z-index: 10000;
-    background: ${Ia() ? "rgba(24, 24, 27, 0.85)" : "rgba(255, 255, 255, 0.85)"};
-    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
-    border-radius: 16px; padding: 16px 20px;
-    box-shadow: 0 10px 30px rgba(131, 58, 180, 0.15), 0 5px 15px rgba(0,0,0,0.1); min-width: 240px;
-    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    font-size: 13px; color: ${n.text};
-    border: 1px solid ${Ia() ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.08)"};
-    transform: translateY(-16px); opacity: 0;
-    transition: transform 0.3s ease, opacity 0.3s ease;
+    position: fixed; top: 70px; right: 20px; z-index: 9999999;
+    background: #ffffff;
+    border-radius: 20px; padding: 16px 18px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.12), 0 4px 12px rgba(0, 0, 0, 0.04);
+    min-width: 290px; max-width: 340px;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    font-size: 13px; color: #1d1d1f;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    transform: translateY(0); opacity: 1;
+    transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease;
+    box-sizing: border-box;
   `),
       (a.innerHTML = `
-    <div style="font-weight: 700; margin-bottom: 8px; display: flex; align-items: center; gap: 8px;">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#833AB4"
-           stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
-           style="animation: igSaverSpin 1s linear infinite;">
-        <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-      </svg>
-      @${e}
-    </div>
-    <div id="ig-saver-status-text" style="margin-bottom: 4px; font-weight: 600;">${_("status_scanning")}</div>
-    <div id="ig-saver-status-count" style="color: ${n.textSecondary}; font-weight: 500; font-size: 12px;">${_("status_posts_found")}</div>
-
-    <div id="ig-saver-progress-container" style="display: none; width: 100%; height: 6px; background: ${Ia() ? "rgba(255,255,255,0.1)" : "rgba(0,0,0,0.08)"}; border-radius: 3px; margin: 10px 0 6px 0; overflow: hidden;">
-      <div id="ig-saver-progress-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #FF304F, #8A2387); transition: width 0.3s ease; border-radius: 3px;"></div>
+    <div style="margin-bottom: 8px;">
+      <span style="font-size: 14px; font-weight: 700; color: #1d1d1f; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block;">@${e || 'usuario'}</span>
     </div>
 
-    <div style="display: flex; justify-content: space-between; font-size: 11px; color: ${n.textSecondary}; margin-top: 4px;">
+    <div id="ig-saver-status-text" style="font-size: 12.5px; font-weight: 600; color: #1d1d1f; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+      ${_("status_scanning") || "Baixando mídias..."}
+    </div>
+
+    <div id="ig-saver-status-count" style="color: #86868b; font-weight: 500; font-size: 11.5px; margin-bottom: 6px;">${_("status_posts_found") || "Localizando publicações..."}</div>
+
+    <div id="ig-saver-progress-container" style="display: block; width: 100%; height: 6px; background: #f2f2f7; border-radius: 999px; margin: 8px 0 6px 0; overflow: hidden;">
+      <div id="ig-saver-progress-bar" style="width: 35%; height: 100%; background: linear-gradient(90deg, #007AFF, #0056b3); transition: width 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); border-radius: 999px;"></div>
+    </div>
+
+    <div style="display: flex; justify-content: space-between; font-size: 11px; font-weight: 500; color: #86868b; margin-top: 4px;">
       <span id="ig-saver-status-time"></span>
       <span id="ig-saver-status-failed"></span>
     </div>
 
     <div id="ig-saver-actions" style="display: flex; gap: 8px; margin-top: 12px; justify-content: flex-end;">
-      <button id="ig-saver-btn-pause" class="ig-saver-btn-status" style="padding: 6px 12px; font-size: 12px; border-radius: 8px; border: 1px solid ${Ia() ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.15)"}; background: transparent; color: ${n.text}; cursor: pointer; display: flex; align-items: center; gap: 6px; font-weight: 600; font-family: inherit; transition: all 0.2s ease; outline: none;">
-        <svg id="ig-saver-btn-pause-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="6" y="4" width="4" height="16" fill="currentColor"></rect>
-          <rect x="14" y="4" width="4" height="16" fill="currentColor"></rect>
-        </svg>
+      <button id="ig-saver-btn-pause" class="ig-saver-btn-status" style="padding: 8px 18px; font-size: 12px; border-radius: 999px; border: 1px solid rgba(0,0,0,0.06); background: #f5f5f7; color: #1d1d1f; cursor: pointer; display: flex; align-items: center; gap: 6px; font-weight: 600; font-family: inherit; transition: all 0.15s ease; outline: none;">
+        <span id="ig-saver-btn-pause-icon" style="display: flex; align-items: center;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="6" y="4" width="4" height="16" fill="currentColor"></rect>
+            <rect x="14" y="4" width="4" height="16" fill="currentColor"></rect>
+          </svg>
+        </span>
         <span id="ig-saver-btn-pause-text">Pausar</span>
       </button>
-      <button id="ig-saver-btn-stop" class="ig-saver-btn-stop-status" style="padding: 6px 12px; font-size: 12px; border-radius: 8px; border: 1px solid rgba(237, 73, 86, 0.2); background: rgba(237, 73, 86, 0.05); color: #ed4956; cursor: pointer; display: flex; align-items: center; gap: 6px; font-weight: 600; font-family: inherit; transition: all 0.2s ease; outline: none;">
+      <button id="ig-saver-btn-stop" class="ig-saver-btn-stop-status" style="padding: 8px 18px; font-size: 12px; border-radius: 999px; border: 1px solid rgba(255, 59, 48, 0.16); background: #fff1f0; color: #ff3b30; cursor: pointer; display: flex; align-items: center; gap: 6px; font-weight: 600; font-family: inherit; transition: all 0.15s ease; outline: none;">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
           <rect x="4" y="4" width="16" height="16" rx="2" fill="currentColor"></rect>
         </svg>
@@ -13059,9 +13615,10 @@ v\xE0 nh\u1EA5n n\xFAt "T\u1EA3i t\u1EA5t c\u1EA3"`,
       ((o.id = "ig-saver-keyframes"),
         (o.textContent = `
           @keyframes igSaverSpin { to { transform: rotate(360deg); } }
-          .ig-saver-btn-status:hover { background: ${Ia() ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.04)"} !important; border-color: ${Ia() ? "rgba(255,255,255,0.3)" : "rgba(0,0,0,0.3)"} !important; transform: scale(1.03); }
+          @keyframes igSaverPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.85); } }
+          .ig-saver-btn-status:hover { background: #e8e8ed !important; transform: scale(1.02); }
           .ig-saver-btn-status:active { transform: scale(0.97); }
-          .ig-saver-btn-stop-status:hover { background: rgba(237, 73, 86, 0.12) !important; border-color: rgba(237, 73, 86, 0.4) !important; transform: scale(1.03); }
+          .ig-saver-btn-stop-status:hover { background: #ffe3e1 !important; border-color: rgba(255, 59, 48, 0.3) !important; transform: scale(1.02); }
           .ig-saver-btn-stop-status:active { transform: scale(0.97); }
         `),
         document.head.appendChild(o));
@@ -13143,6 +13700,292 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
         (n.style.whiteSpace = "pre-line"));
     }
   }
+  async function resolveProfileUserInfo(u) {
+    if (!u) return { userId: null, profilePicUrl: null };
+    let target = String(u).toLowerCase().replace(/^@+/, "");
+    let userId = null;
+    let profilePicUrl = null;
+
+    try {
+      // 1. Meta tags da página SOMENTE se estivermos na página de perfil do próprio target
+      let currentPathUser = window.location.pathname.toLowerCase().replace(/^\/+/, '').split('/')[0];
+      if (currentPathUser === target && !window.location.pathname.startsWith("/stories/")) {
+        let metaTags = document.querySelectorAll('meta[property*="user_id"], meta[name*="user_id"]');
+        for (let m of metaTags) {
+          let val = m.getAttribute("content");
+          if (val && /^\d+$/.test(val)) { userId = val; break; }
+        }
+      }
+
+      let ogImage = document.querySelector('meta[property="og:image"]')?.getAttribute("content");
+      if (ogImage && !ogImage.includes("static") && !ogImage.includes("default")) {
+        profilePicUrl = ogImage;
+      }
+
+      // 2. Imagens no DOM do perfil ou Story header
+      if (!profilePicUrl) {
+        let avatarImg = document.querySelector('header img[alt*="profile picture"], header img[alt*="foto do perfil"], img[alt*="foto de perfil de ' + target + '"], header img, a[href="/' + target + '/"] img');
+        if (avatarImg && avatarImg.src && !avatarImg.src.includes("data:")) {
+          profilePicUrl = avatarImg.src;
+        }
+      }
+
+      // 3. Extração via Scripts JSON da página (Stories / Polaris state)
+      if (!userId) {
+        try {
+          let scripts = document.querySelectorAll('script[type="application/json"]');
+          for (let s of scripts) {
+            let text = s.textContent || "";
+            if (text.includes(target)) {
+              let m1 = text.match(new RegExp(`"username"\\s*:\\s*"${target}"[^}]*"(?:pk|id|user_id|pk_id)"\\s*:\\s*"?(\\d+)"?`, "i"));
+              if (m1) { userId = m1[1]; break; }
+              let m2 = text.match(new RegExp(`"(?:pk|id|user_id|pk_id)"\\s*:\\s*"?(\\d+)"?[^}]*"username"\\s*:\\s*"${target}"`, "i"));
+              if (m2) { userId = m2[1]; break; }
+              let m3 = text.match(/"target_user_id"\s*:\s*"?(\d+)"?/);
+              if (m3) { userId = m3[1]; break; }
+              let m4 = text.match(/"reel_id"\s*:\s*"?(\\d+)"?/);
+              if (m4 && !m4[1].includes("highlight")) { userId = m4[1]; break; }
+            }
+          }
+        } catch {}
+      }
+
+      // 4. Cache local rápido de posts interceptados (timeout de 80ms)
+      if (!userId) {
+        try {
+          let cacheKey = `ig_saver_cache_${target}`;
+          let cached = (await Promise.race([
+            chrome.storage.local.get(cacheKey),
+            new Promise(res => setTimeout(() => res(null), 80))
+          ]))?.[cacheKey];
+          if (cached && Array.isArray(cached.posts) && cached.posts.length > 0) {
+            for (let p of cached.posts) {
+              if (p.ownerId || p.userId || p.creatorId || p.owner?.id) {
+                userId = String(p.ownerId || p.userId || p.creatorId || p.owner?.id);
+                break;
+              }
+            }
+          }
+        } catch {}
+      }
+
+      // 5. Topsearch API (não sofre com rate limit agressivo)
+      if (!userId) {
+        try {
+          let sRes = await fetch(
+            `https://www.instagram.com/api/v1/web/search/topsearch/?context=blended&query=${encodeURIComponent(target)}`,
+            {
+              credentials: "include",
+              headers: oe(`https://www.instagram.com/${target}/`),
+            }
+          );
+          if (sRes.ok) {
+            let sJson = await sRes.json();
+            let users = sJson?.users || [];
+            let exact = users.find(u => u?.user?.username?.toLowerCase() === target) || users[0];
+            if (exact?.user?.pk || exact?.user?.id) {
+              userId = String(exact.user.pk || exact.user.id);
+              if (exact.user.profile_pic_url && !profilePicUrl) {
+                profilePicUrl = exact.user.profile_pic_url;
+              }
+            }
+          }
+        } catch {}
+      }
+
+      // 6. Busca via API web_profile_info com headers reforçados
+      if (!userId) {
+        try {
+          let controller = new AbortController();
+          let timeoutId = setTimeout(() => controller.abort(), 2500);
+          let fetchRes = await fetch(
+            `https://www.instagram.com/api/v1/users/web_profile_info/?username=${target}`,
+            {
+              credentials: "include",
+              headers: oe(`https://www.instagram.com/${target}/`),
+              signal: controller.signal
+            }
+          );
+          clearTimeout(timeoutId);
+          if (fetchRes.ok) {
+            let json = await fetchRes.json();
+            let uData = json?.data?.user;
+            if (uData?.id || uData?.pk) {
+              userId = String(uData.id || uData.pk);
+            }
+            if (uData?.profile_pic_url_hd || uData?.profile_pic_url) {
+              profilePicUrl = uData.profile_pic_url_hd || uData.profile_pic_url;
+            }
+          }
+        } catch {}
+      }
+    } catch (err) {
+      console.warn("[ig-saver] Erro ao resolver info rápida do perfil:", err);
+    }
+
+    return { userId, profilePicUrl };
+  }
+
+  async function resolveProfileUserId(u) {
+    let res = await resolveProfileUserInfo(u);
+    return res.userId;
+  }
+
+  function switchToProfileReelsTab(targetUser) {
+    if (!targetUser) return;
+    let u = String(targetUser).toLowerCase().replace(/^@+/, "");
+    let currentPath = window.location.pathname.toLowerCase();
+    if (currentPath === `/${u}/reels/` || currentPath === `/${u}/reels`) return;
+
+    // 1. Tentar encontrar a aba específica de Reels do perfil (NUNCA a barra lateral global '/reels/')
+    let candidateLinks = Array.from(document.querySelectorAll(`a[href*="/${u}/reels/"], a[href*="/${u}/reels"], a[role="tab"]`));
+    let profileTab = candidateLinks.find(a => {
+      let href = (a.getAttribute("href") || "").toLowerCase();
+      return href === `/${u}/reels/` || href === `/${u}/reels` || href.startsWith(`/${u}/reels/`) || href.includes(`/${u}/reels`);
+    });
+
+    if (profileTab) {
+      try { profileTab.click(); return; } catch {}
+    }
+
+    // 2. Tentar encontrar abas no container principal do perfil (excluindo qualquer link que seja puramente '/reels/')
+    let headerTabs = Array.from(document.querySelectorAll('header ~ div a[href*="/reels"], [role="tablist"] a[href*="/reels"], main a[href*="/reels"]'));
+    let validTab = headerTabs.find(a => {
+      let href = (a.getAttribute("href") || "").toLowerCase();
+      return href !== "/reels/" && href !== "/reels" && !href.startsWith("/reels/");
+    });
+
+    if (validTab) {
+      try { validTab.click(); return; } catch {}
+    }
+  }
+
+  let activeScrollScanState = null;
+
+  async function runScrollScan(payload) {
+    let { taskId, username, topK, source, filter, dateFilter } = payload;
+    if (activeScrollScanState && activeScrollScanState.taskId === taskId) return;
+
+    let scanState = { taskId, aborted: false };
+    activeScrollScanState = scanState;
+
+    let target = String(username || "").toLowerCase().replace(/^@+/, "");
+    let seenShortcodes = new Set();
+    let scrollAttempts = 0;
+    let maxScrollAttempts = 350;
+    let consecutiveNoNew = 0;
+
+    let statusTextEl = document.getElementById("ig-saver-status-text");
+    let isVideosOnly = filter === "videos" || source === "reels";
+    let isPhotosOnly = filter === "photos";
+
+    if (statusTextEl) {
+      statusTextEl.textContent = isVideosOnly 
+        ? "Buscando Reels na aba de vídeos..." 
+        : "Rolando página e buscando mídias...";
+    }
+
+    // Se é modo exclusivo de vídeos e ainda não está na aba de Reels, navega até ela
+    if (isVideosOnly && !window.location.pathname.includes("/reels/")) {
+      switchToProfileReelsTab(target);
+      await new Promise(r => setTimeout(r, 600));
+    }
+
+    try {
+      while (!scanState.aborted && scrollAttempts < maxScrollAttempts) {
+        scrollAttempts++;
+        let collectedBatch = [];
+
+        // Identificar se a aba ativa está no perfil alvo
+        let pathParts = window.location.pathname.split("/").filter(Boolean);
+        let pathUser = pathParts[0] ? pathParts[0].toLowerCase().replace(/^@+/, "") : "";
+        let isSpecialPath = ["p", "reel", "stories", "explore", "direct", "accounts"].includes(pathUser);
+        let currentProfile = (!isSpecialPath && pathUser) ? pathUser : target;
+
+        if (currentProfile === target || !isSpecialPath) {
+          let linkSelector = isVideosOnly 
+            ? 'a[href*="/reel/"]' 
+            : (isPhotosOnly ? 'a[href*="/p/"]' : 'a[href*="/p/"], a[href*="/reel/"]');
+          let postLinks = document.querySelectorAll(linkSelector);
+          for (let a of postLinks) {
+            if (scanState.aborted) break;
+            if (topK && topK > 0 && seenShortcodes.size >= topK) break;
+            let href = a.getAttribute("href") || "";
+            let mCode = href.match(/\/(?:p|reel)\/([A-Za-z0-9_-]+)/);
+            if (mCode && mCode[1]) {
+              let code = mCode[1];
+              if (!seenShortcodes.has(code)) {
+                seenShortcodes.add(code);
+                collectedBatch.push({
+                  shortcode: code,
+                  isReel: href.includes("/reel/")
+                });
+                if (topK && topK > 0 && seenShortcodes.size >= topK) break;
+              }
+            }
+          }
+        }
+
+        if (scanState.aborted) break;
+
+        let isTopKMet = (topK && topK > 0 && seenShortcodes.size >= topK);
+
+        if (collectedBatch.length > 0) {
+          consecutiveNoNew = 0;
+          let foundMsg = `Capturando mídias (${seenShortcodes.size} encontradas)...`;
+          if (statusTextEl) statusTextEl.textContent = foundMsg;
+          let modalStatusText = document.getElementById("ig-saver-modal-status-text");
+          let modalProgressFill = document.getElementById("ig-saver-modal-progress-fill");
+          if (modalStatusText) modalStatusText.textContent = "Baixando mídias...";
+          if (modalProgressFill) {
+            modalProgressFill.className = "ig-saver-modal-progress-fill indeterminate";
+            modalProgressFill.style.background = "#0071e3";
+          }
+          await w({
+            type: "INGEST_SCROLL_POSTS",
+            payload: {
+              taskId,
+              username,
+              posts: collectedBatch,
+              isDone: isTopKMet ? true : false
+            }
+          }).catch(() => {});
+        } else {
+          consecutiveNoNew++;
+        }
+
+        if (scanState.aborted || isTopKMet || consecutiveNoNew >= 25) {
+          break;
+        }
+
+        // Rolar a página suavemente para carregar os próximos vídeos
+        let scrollDist = consecutiveNoNew > 5 ? 1200 : 750;
+        window.scrollBy({ top: scrollDist, behavior: "smooth" });
+        let waitMs = consecutiveNoNew > 3 ? 1200 : 800;
+        await new Promise(r => setTimeout(r, waitMs));
+        if (scanState.aborted) break;
+      }
+
+      if (!scanState.aborted) {
+        await w({
+          type: "INGEST_SCROLL_POSTS",
+          payload: {
+            taskId,
+            username,
+            posts: [],
+            isDone: true
+          }
+        }).catch(() => {});
+      }
+    } catch (err) {
+      console.warn("[Dog Saver] Erro no scroll scan:", err.message);
+    } finally {
+      if (activeScrollScanState === scanState) {
+        activeScrollScanState = null;
+      }
+    }
+  }
+
   async function an(
     i,
     e,
@@ -13155,11 +13998,16 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
     minComments = 0,
     hashtag = "",
     minSaves = 0,
+    onlyExtras = false,
   ) {
     try {
       let r = document.cookie.match(/csrftoken=([^;]+)/),
-        s = r ? r[1].trim() : void 0,
-        l = await w({
+        s = r ? r[1].trim() : void 0;
+      
+      // Resolução proativa e rápida do userId e profilePicUrl antes de enviar a tarefa ao background
+      let { userId: resolvedUserId, profilePicUrl: resolvedProfilePicUrl } = await resolveProfileUserInfo(i);
+
+      let l = await w({
           type: "START_BULK_DOWNLOAD",
           payload: {
             username: i,
@@ -13170,33 +14018,49 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
             flatFolder: a,
             source: o,
             csrfToken: s,
+            userId: resolvedUserId,
+            profilePicUrl: resolvedProfilePicUrl,
             minLikes: minLikes,
             minViews: minViews,
             minComments: minComments,
             hashtag: hashtag,
             minSaves: minSaves,
+            onlyExtras: onlyExtras,
           },
         });
       if (!l) throw new Error('O processo de download não respondeu. Reinicie o ViralDog e tente novamente.');
-      if (l.error === "pro_required") {
-        let c = l.reason ?? "generic";
-        return (Z({ reason: c, getTheme: L }), null);
-      }
       if (l.error)
         return (m(_("notify_error", { message: l.error }), "error"), null);
       let d = l.task;
-      return (
-        (H = d.taskId),
-        m(_("notify_started", { username: i }), "success"),
-        he(d.taskId, i),
-        d.taskId
-      );
+      H = d.taskId;
+      try {
+        m(_("notify_started", { username: i }), "success");
+      } catch {}
+      try {
+        he(d.taskId, i, resolvedProfilePicUrl);
+      } catch (err) {
+        console.warn("[ig-saver] Erro ao exibir widget de status:", err);
+      }
+
+      return d.taskId;
     } catch (r) {
+      if (Gt(r)) {
+        return (
+          m(
+            "Conexão com a extensão perdida.",
+            "error",
+            false,
+            10000,
+            { text: "Recarregar Página", onClick: () => location.reload() }
+          ),
+          null
+        );
+      }
       return (m(_("notify_error", { message: D(r.message) }), "error"), null);
     }
   }
   var B = new Map();
-  function m(i, e, t = !1) {
+  function m(i, e, t = !1, duration = 4e3, actionBtn = null) {
     e === "success" && t && (Ja(), Ya());
     let n = document.getElementById("ig-saver-toast");
     n && n.remove();
@@ -13212,11 +14076,24 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
     font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     color: white; box-shadow: 0 10px 30px rgba(0,0,0,0.25);
     background: ${e === "success" ? "linear-gradient(135deg, #10B981, #059669)" : "linear-gradient(135deg, #EF4444, #DC2626)"};
-    display: flex; align-items: center; gap: 8px;
+    display: flex; align-items: center; gap: 10px;
     border: 1px solid rgba(255,255,255,0.1);
     transform: translateX(120%); transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.3s;
   `),
       (o.innerHTML = `${a}<span>${i}</span>`),
+      actionBtn && (() => {
+        let btn = document.createElement("button");
+        btn.textContent = actionBtn.text || "Ação";
+        btn.style.cssText = `
+          margin-left: 8px; background: #ffffff; color: #dc2626; border: none;
+          border-radius: 6px; padding: 4px 10px; font-size: 12px; font-weight: 700;
+          cursor: pointer; box-shadow: 0 2px 5px rgba(0,0,0,0.2); white-space: nowrap;
+        `;
+        btn.addEventListener("click", () => {
+          if (typeof actionBtn.onClick === "function") actionBtn.onClick();
+        });
+        o.appendChild(btn);
+      })(),
       document.body.appendChild(o),
       requestAnimationFrame(() => {
         o.style.transform = "translateX(0)";
@@ -13225,9 +14102,29 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
         ((o.style.transform = "translateX(120%)"),
           (o.style.opacity = "0"),
           setTimeout(() => o.remove(), 350));
-      }, 4e3));
+      }, duration));
   }
   chrome.runtime.onMessage.addListener((i, e, t) => {
+    if (i?.type === "IG_SAVER_GET_PAGE_USER_ID") {
+      (async () => {
+        try {
+          let u = i.username || O();
+          let uid = await resolveProfileUserId(u);
+          let pic = document.querySelector('header img[alt*="profile"], header img')?.src || null;
+          t({ userId: uid, profilePicUrl: pic });
+        } catch (err) {
+          t({ userId: null, error: err.message });
+        }
+      })();
+      return true;
+    }
+    if (i?.type === "START_SCROLL_SCAN") {
+      t({ started: true });
+      runScrollScan(i.payload).catch(err => {
+        console.warn("[Dog Saver] runScrollScan error:", err);
+      });
+      return true;
+    }
     if (i?.type === "OPEN_DOWNLOAD_DIALOG") {
       try {
         Xa();
@@ -13254,9 +14151,7 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
           oldestTs: l,
           message: d,
           zipChunkSize: c,
-        } = i.payload,
-        u = O();
-      if (a !== u) return (t({ ok: !0 }), !0);
+        } = i.payload;
       document.getElementById("ig-saver-status") || ((H = n), he(n, a));
       let p = { posts: r, media: s, oldestTs: l, zipChunkSize: c };
       switch (o) {
@@ -13346,11 +14241,16 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
     return r;
   }
   function st(i = 0) {
-    if (document.getElementById("ig-saver-single-btn") || (!tt() && !De()))
+    let hasDialog = !!document.querySelector('div[role="dialog"]');
+    if (document.getElementById("ig-saver-single-btn") || (!tt() && !De() && !hasDialog))
       return;
     let e = na();
+    if (!e && hasDialog) {
+      let modalLink = document.querySelector('div[role="dialog"] a[href*="/p/"], div[role="dialog"] a[href*="/reel/"], div[role="dialog"] a[href*="/reels/"]');
+      if (modalLink) e = pt(modalLink) || ut(modalLink);
+    }
     if (!e) return;
-    let t = De(),
+    let t = De() || window.location.pathname.includes("/reel") || !!document.querySelector('div[role="dialog"] video'),
       n = Ma(),
       a = nn();
     if (!a) {
@@ -13365,48 +14265,52 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
       r.setAttribute("aria-label", _("aria_download_post")),
       (r.style.cssText = `
     position: absolute;
-    top: 12px;
-    left: 12px;
+    top: 10px;
+    left: 10px;
     z-index: 9999;
-    width: 36px;
-    height: 36px;
+    width: 34px;
+    height: 34px;
     padding: 0;
-    background: rgba(0, 0, 0, 0.55);
-    border: none;
+    background: rgba(0, 0, 0, 0.68);
+    border: 1px solid rgba(255, 255, 255, 0.2);
     border-radius: 50%;
     cursor: pointer;
-    opacity: 0;
-    transition: opacity 0.2s ease, background 0.15s ease;
+    opacity: 0.92;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
     display: flex;
     align-items: center;
     justify-content: center;
     pointer-events: auto;
   `),
       (r.innerHTML = `
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ffffff"
-         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ffffff"
+         stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="filter: drop-shadow(0 1px 2px rgba(0,0,0,0.3));">
       <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
       <polyline points="7 10 12 15 17 10"/>
       <line x1="12" y1="15" x2="12" y2="3"/>
     </svg>
   `),
       r.addEventListener("mouseenter", () => {
-        r.style.background = "rgba(0, 0, 0, 0.75)";
+        r.style.background = "#0071e3";
+        r.style.borderColor = "rgba(255, 255, 255, 0.4)";
+        r.style.opacity = "1";
+        r.style.transform = "scale(1.08)";
+        r.style.boxShadow = "0 6px 20px rgba(0, 113, 227, 0.4)";
       }),
       r.addEventListener("mouseleave", () => {
-        r.style.background = "rgba(0, 0, 0, 0.55)";
+        r.style.background = "rgba(0, 0, 0, 0.68)";
+        r.style.borderColor = "rgba(255, 255, 255, 0.2)";
+        r.style.opacity = "0.92";
+        r.style.transform = "scale(1)";
+        r.style.boxShadow = "0 4px 14px rgba(0, 0, 0, 0.25)";
       }),
       r.addEventListener("click", (s) => {
         (s.preventDefault(), s.stopPropagation(), ht(n, e, r, t));
       }),
-      a.appendChild(r),
-      a.addEventListener("mouseenter", () => {
-        r.style.opacity = "1";
-      }),
-      a.addEventListener("mouseleave", () => {
-        r.disabled || (r.style.opacity = "0");
-      }),
-      a.matches(":hover") && (r.style.opacity = "1"));
+      a.appendChild(r));
   }
   function R() {
     let i = document.getElementById("ig-saver-single-btn");
@@ -13482,36 +14386,47 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
       a.setAttribute("aria-label", _("aria_download_reel")),
       (a.style.cssText = `
     position: absolute;
-    top: 12px;
-    left: 12px;
+    top: 10px;
+    left: 10px;
     z-index: 9999;
-    width: 36px;
-    height: 36px;
+    width: 34px;
+    height: 34px;
     padding: 0;
-    background: rgba(0, 0, 0, 0.55);
-    border: none;
+    background: rgba(0, 0, 0, 0.68);
+    border: 1px solid rgba(255, 255, 255, 0.2);
     border-radius: 50%;
     cursor: pointer;
-    opacity: 0;
-    transition: opacity 0.2s ease, background 0.15s ease;
+    opacity: 0.92;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
     display: flex;
     align-items: center;
     justify-content: center;
     pointer-events: auto;
   `),
       (a.innerHTML = `
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ffffff"
-         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ffffff"
+         stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="filter: drop-shadow(0 1px 2px rgba(0,0,0,0.3));">
       <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
       <polyline points="7 10 12 15 17 10"/>
       <line x1="12" y1="15" x2="12" y2="3"/>
     </svg>
   `),
       a.addEventListener("mouseenter", () => {
-        a.style.background = "rgba(0, 0, 0, 0.75)";
+        a.style.background = "#0071e3";
+        a.style.borderColor = "rgba(255, 255, 255, 0.4)";
+        a.style.opacity = "1";
+        a.style.transform = "scale(1.08)";
+        a.style.boxShadow = "0 6px 20px rgba(0, 113, 227, 0.4)";
       }),
       a.addEventListener("mouseleave", () => {
-        a.style.background = "rgba(0, 0, 0, 0.55)";
+        a.style.background = "rgba(0, 0, 0, 0.68)";
+        a.style.borderColor = "rgba(255, 255, 255, 0.2)";
+        a.style.opacity = "0.92";
+        a.style.transform = "scale(1)";
+        a.style.boxShadow = "0 4px 14px rgba(0, 0, 0, 0.25)";
       }),
       a.addEventListener("click", (r) => {
         (r.preventDefault(), r.stopPropagation(), oa(t, a, !0));
@@ -13533,22 +14448,7 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
           oa(t, a, !0));
       }),
       document.addEventListener("click", reelsClickCapture, !0),
-      n.appendChild(a),
-      n.addEventListener("mouseenter", () => {
-        a.style.opacity = "1";
-      }),
-      n.addEventListener("mousemove", () => {
-        a.style.opacity = "1";
-      }),
-      n.addEventListener("mouseleave", () => {
-        a.disabled || (a.style.opacity = "0");
-      }));
-    let o = n.getBoundingClientRect();
-    pe >= o.left &&
-      pe <= o.right &&
-      ge >= o.top &&
-      ge <= o.bottom &&
-      (a.style.opacity = "1");
+      n.appendChild(a));
   }
   function Ye() {
     (clearReelsClickCapture(),
@@ -13579,70 +14479,243 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
         ((Le = null), ot());
       }, 300)));
   }
-  function ln() {
-    let i = document.querySelectorAll("video, img[src]"),
-      e = null,
-      t = 0;
-    for (let r of i) {
-      let s = r.getBoundingClientRect(),
-        l = s.width * s.height;
-      l > t && s.width >= 200 && s.height >= 300 && ((t = l), (e = r));
+  function getActiveStoryCreator() {
+    let urlMatch = window.location.pathname.match(/^\/stories\/([^/?#]+)/);
+    if (urlMatch && urlMatch[1] !== "highlights") {
+      return urlMatch[1];
     }
-    if (!e) return null;
-    let n = e.getBoundingClientRect(),
-      a = null,
-      o = e.parentElement;
-    for (; o && o !== document.body; ) {
-      let r = o.getBoundingClientRect();
-      if (
-        o.tagName.toLowerCase() === "div" &&
-        r.width >= 200 &&
-        r.height >= 300
-      )
-        if (r.width <= n.width * 1.3) a = o;
-        else break;
+    let container = la() || document;
+    let link = container.querySelector('header a[href^="/"], a[role="link"][href^="/"]');
+    if (link) {
+      let href = link.getAttribute("href") || "";
+      let m = href.match(/^\/([^/?#]+)/);
+      if (m && !["stories", "explore", "p", "reel", "reels", "direct", "accounts"].includes(m[1].toLowerCase())) {
+        return m[1];
+      }
+    }
+    return Ce() || "unknown";
+  }
+  function ln() {
+    let centerContainer = la();
+    if (centerContainer && centerContainer !== document) {
+      return centerContainer;
+    }
+    let centerX = window.innerWidth / 2;
+    let centerY = window.innerHeight / 2;
+    let els = document.querySelectorAll("video, img[src]");
+    let best = null;
+    let bestDist = Infinity;
+    for (let r of els) {
+      let rect = r.getBoundingClientRect();
+      if (rect.width < 150 || rect.height < 250) continue;
+      let midX = rect.left + rect.width / 2;
+      let midY = rect.top + rect.height / 2;
+      let dist = Math.hypot(midX - centerX, midY - centerY);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = r;
+      }
+    }
+    if (!best) return null;
+    let o = best.parentElement;
+    for (let c = 0; c < 5 && o && o !== document.body; c++) {
+      if (o.tagName === "SECTION" || o.getAttribute("role") === "dialog" || (o.tagName === "DIV" && o.getBoundingClientRect().width >= 200)) {
+        return o;
+      }
       o = o.parentElement;
     }
-    return a;
+    return best.parentElement || best;
   }
   function $() {
     (document.getElementById("ig-saver-story-btn")?.remove(),
       document.getElementById("ig-saver-story-all-btn")?.remove());
   }
+  function requestInterceptedStories(username) {
+    return new Promise((resolve) => {
+      let requestId = "stories_" + Date.now() + "_" + Math.random().toString(36).slice(2);
+      let timer = setTimeout(() => {
+        window.removeEventListener("message", onMsg);
+        resolve([]);
+      }, 500);
+      function onMsg(ev) {
+        if (ev.source !== window || ev.data?.type !== "IG_SAVER_INTERCEPTED_STORIES_RESPONSE" || ev.data?.requestId !== requestId) return;
+        clearTimeout(timer);
+        window.removeEventListener("message", onMsg);
+        let rawItems = ev.data?.rawItems || [];
+        resolve(rawItems);
+      }
+      window.addEventListener("message", onMsg);
+      window.postMessage({
+        type: "IG_SAVER_REQUEST_INTERCEPTED_STORIES",
+        username,
+        requestId
+      }, "*");
+    });
+  }
+
+  function extractStoriesFromPageScripts(username) {
+    let cleanUser = String(username || "").toLowerCase().replace(/^@+/, "");
+    let found = [];
+    let seenUrls = new Set();
+    try {
+      let scripts = document.querySelectorAll('script[type="application/json"]');
+      for (let s of scripts) {
+        let text = s.textContent || "";
+        if (!text.includes("video_versions") && !text.includes("image_versions2") && !text.includes("reels_media") && !text.includes("expiring_at")) continue;
+        let json;
+        try { json = JSON.parse(text); } catch { continue; }
+
+        let searchNodes = (obj, isInsideStoryScope = false) => {
+          if (!obj || typeof obj !== "object") return;
+          if (Array.isArray(obj)) {
+            for (let item of obj) searchNodes(item, isInsideStoryScope);
+            return;
+          }
+          
+          let currentScopeIsStory = isInsideStoryScope || 
+            Boolean(obj.reels_media || obj.xdt_api__v1__feed__reels_media || obj.story_bucket || obj.highlight_reel || obj.expiring_at);
+
+          if (obj.video_versions || obj.image_versions2) {
+            let isStoryItem = currentScopeIsStory || Boolean(obj.expiring_at || obj.story_feed_media);
+            if (isStoryItem) {
+              let itemUser = String(obj.user?.username || obj.owner?.username || "").toLowerCase();
+              if (!cleanUser || !itemUser || itemUser === cleanUser) {
+                let isVideo = obj.media_type === 2 || Boolean(obj.video_versions?.length);
+                let videoUrl = isVideo ? selectVideoUrl(obj.video_versions, obj.video_url) : "";
+                let imageUrl = obj.image_versions2?.candidates?.[0]?.url || obj.display_url || "";
+                let url = isVideo && videoUrl ? videoUrl : (imageUrl || videoUrl);
+                let id = String(obj.pk || obj.id || obj.code || Date.now());
+                if (url && !seenUrls.has(url)) {
+                  seenUrls.add(url);
+                  found.push({
+                    postId: `story_${id}`,
+                    index: found.length,
+                    type: isVideo ? "video" : "image",
+                    url: url,
+                    timestamp: obj.taken_at || Math.floor(Date.now() / 1000),
+                    creator: itemUser || cleanUser || "unknown",
+                  });
+                }
+              }
+            }
+          }
+          for (let k in obj) {
+            if (typeof obj[k] === "object") {
+              let nextScope = currentScopeIsStory || ["reels_media", "reels", "reel", "story", "highlight_reel", "items"].includes(k);
+              searchNodes(obj[k], nextScope);
+            }
+          }
+        };
+        searchNodes(json);
+      }
+    } catch (err) {
+      console.warn("[Dog Saver] extractStoriesFromPageScripts error:", err);
+    }
+    return found;
+  }
+
   function Qt() {
-    let i = ln();
-    if (!i) return null;
-    let e = i.querySelector("video[src], video source[src]"),
-      t = e?.tagName === "VIDEO" ? e.src : e?.getAttribute("src");
-    if (t && t.startsWith("http"))
+    let activeContainer = ln() || document;
+    let creator = getActiveStoryCreator();
+    let currentStoryId = ce() || Date.now().toString();
+
+    // 1. Tentar encontrar a mídia exata no cache de scripts da página para alta resolução
+    let scriptStories = extractStoriesFromPageScripts(creator);
+    if (scriptStories.length > 0 && currentStoryId) {
+      let matched = scriptStories.find(s => s.postId.includes(currentStoryId));
+      if (matched) {
+        return {
+          postId: F() ? `highlight_${currentStoryId}` : `story_${currentStoryId}`,
+          index: 0,
+          type: matched.type,
+          url: matched.url,
+          timestamp: matched.timestamp || Math.floor(Date.now() / 1000),
+          creator: creator || matched.creator || "unknown",
+        };
+      }
+    }
+
+    let centerX = window.innerWidth / 2;
+    let centerY = window.innerHeight / 2;
+
+    // 2. Procurar elemento <video> ativo no player
+    let vids = Array.from(document.querySelectorAll("video"));
+    let visibleVids = vids.filter(v => {
+      let r = v.getBoundingClientRect();
+      if (r.width < 120 || r.height < 200) return false;
+      if (r.right < centerX * 0.4 || r.left > centerX * 1.6) return false;
+      let style = window.getComputedStyle(v);
+      if (style.display === "none" || style.visibility === "hidden" || parseFloat(style.opacity || "1") < 0.1) return false;
+      return true;
+    });
+
+    // Ordenar: preferir vídeos que não estão pausados e mais próximos do centro
+    visibleVids.sort((a, b) => {
+      if (!a.paused && b.paused) return -1;
+      if (a.paused && !b.paused) return 1;
+      let rA = a.getBoundingClientRect(), rB = b.getBoundingClientRect();
+      let distA = Math.hypot(rA.left + rA.width / 2 - centerX, rA.top + rA.height / 2 - centerY);
+      let distB = Math.hypot(rB.left + rB.width / 2 - centerX, rB.top + rB.height / 2 - centerY);
+      return distA - distB;
+    });
+
+    let vid = visibleVids[0] || activeContainer.querySelector("video[src], video source[src], video");
+    let vidSrc = vid?.currentSrc || vid?.src || vid?.querySelector("source")?.src || vid?.getAttribute("src");
+    if (vidSrc && (vidSrc.startsWith("http") || vidSrc.startsWith("blob:"))) {
       return {
-        postId: `story_${ce() || Date.now()}`,
+        postId: F() ? `highlight_${currentStoryId}` : `story_${currentStoryId}`,
         index: 0,
         type: "video",
-        url: t,
+        url: vidSrc,
         timestamp: Math.floor(Date.now() / 1e3),
-        creator: Ce() || "unknown",
+        creator: creator || "unknown",
       };
-    if (i.querySelector("video")) return null;
-    let n = i.querySelectorAll("img[src]"),
-      a = null,
-      o = 0;
-    for (let s of n) {
-      let l = s.getBoundingClientRect(),
-        d = l.width * l.height;
-      d > o && ((o = d), (a = s));
     }
-    let r = a?.src;
-    return r && r.startsWith("http")
-      ? {
-          postId: `story_${ce() || Date.now()}`,
-          index: 0,
-          type: "image",
-          url: r,
-          timestamp: Math.floor(Date.now() / 1e3),
-          creator: Ce() || "unknown",
-        }
-      : null;
+
+    // 3. Procurar elemento <img> ativo no player
+    let imgs = Array.from(document.querySelectorAll("img[src]"));
+    let visibleImgs = imgs.filter(imgEl => {
+      let r = imgEl.getBoundingClientRect();
+      if (r.width < 150 || r.height < 250) return false;
+      if (r.right < centerX * 0.4 || r.left > centerX * 1.6) return false;
+      let style = window.getComputedStyle(imgEl);
+      if (style.display === "none" || style.visibility === "hidden" || parseFloat(style.opacity || "1") < 0.1) return false;
+      return true;
+    });
+
+    visibleImgs.sort((a, b) => {
+      let rA = a.getBoundingClientRect(), rB = b.getBoundingClientRect();
+      let areaA = rA.width * rA.height, areaB = rB.width * rB.height;
+      return areaB - areaA;
+    });
+
+    let img = visibleImgs[0];
+    let r = img?.currentSrc || img?.src;
+    if (r && (r.startsWith("http") || r.startsWith("blob:"))) {
+      return {
+        postId: F() ? `highlight_${currentStoryId}` : `story_${currentStoryId}`,
+        index: 0,
+        type: "image",
+        url: r,
+        timestamp: Math.floor(Date.now() / 1e3),
+        creator: creator || "unknown",
+      };
+    }
+
+    // 4. Se ainda não achou e houver scripts
+    if (scriptStories.length > 0) {
+      let first = scriptStories[0];
+      return {
+        postId: F() ? `highlight_${currentStoryId}` : `story_${currentStoryId}`,
+        index: 0,
+        type: first.type,
+        url: first.url,
+        timestamp: first.timestamp || Math.floor(Date.now() / 1000),
+        creator: creator || first.creator || "unknown",
+      };
+    }
+
+    return null;
   }
   async function dn(i) {
     let e = i.innerHTML;
@@ -13662,50 +14735,96 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
       (i.style.opacity = "1"));
     try {
       let t = null;
+      let activeCreator = getActiveStoryCreator() || Ce() || "unknown";
+      let currentStoryId = ce() || "";
+
       if (F()) {
-        if (((t = Qt()), t)) {
-          let s = ce() || Date.now().toString();
-          t.postId = `highlight_${s}`;
-        }
-        if (!t) {
-          let s = aa();
-          if (s) {
-            let d = await new N("unknown").fetchHighlightItems(s),
-              c = ce();
-            (c && d.items.length > 0
-              ? (t = d.items.find((u) => u.postId.includes(c)) || d.items[0])
-              : d.items.length > 0 && (t = d.items[0]),
-              t && (t.postId = t.postId.replace(/^story_/, "highlight_")));
+        let highlightId = aa();
+        if (highlightId) {
+          try {
+            let d = await new N(activeCreator !== "unknown" ? activeCreator : "unknown").fetchHighlightItems(highlightId);
+            if (d && d.items && d.items.length > 0) {
+              t = currentStoryId ? d.items.find((u) => u.postId.includes(currentStoryId)) : null;
+              if (t) {
+                t = { ...t, postId: t.postId.replace(/^story_/, "highlight_"), creator: d.username || activeCreator };
+              }
+            }
+          } catch (eH) {
+            console.warn("[Dog Saver] Highlight fetch error in single download:", eH);
           }
         }
-      } else if (((t = Qt()), !t)) {
-        let s = Ce();
+        if (!t && currentStoryId) {
+          let scriptStories = extractStoriesFromPageScripts(activeCreator);
+          if (scriptStories && scriptStories.length > 0) {
+            let matched = scriptStories.find((s) => s.postId.includes(currentStoryId));
+            if (matched) {
+              t = { ...matched, postId: matched.postId.replace(/^story_/, "highlight_"), creator: activeCreator };
+            }
+          }
+        }
+        if (!t) {
+          t = Qt();
+          if (t) {
+            let s = currentStoryId || Date.now().toString();
+            t.postId = `highlight_${s}`;
+            if (activeCreator && activeCreator !== "unknown") t.creator = activeCreator;
+          }
+        }
+      } else {
+        let s = activeCreator !== "unknown" ? activeCreator : Ce();
         if (s) {
-          let l = new N(s),
-            d = await l.getUserId(s);
-          if (d) {
-            let c = await l.fetchUserStories(d),
-              u = ce();
-            u && c.length > 0
-              ? (t = c.find((p) => p.postId.includes(u)) || c[0])
-              : c.length > 0 && (t = c[0]);
+          try {
+            let l = new N(s);
+            let d = await l.getUserId(s);
+            let c = await l.fetchUserStories(d || s);
+            if (c && c.length > 0) {
+              t = currentStoryId ? c.find((p) => p.postId.includes(currentStoryId)) : null;
+              if (t) t.creator = s;
+            }
+          } catch (eS) {
+            console.warn("[Dog Saver] Story fetch error in single download:", eS);
+          }
+        }
+        if (!t && currentStoryId) {
+          let scriptStories = extractStoriesFromPageScripts(s || activeCreator);
+          if (scriptStories && scriptStories.length > 0) {
+            let matched = scriptStories.find((item) => item.postId.includes(currentStoryId));
+            if (matched) {
+              t = matched;
+              if (s) t.creator = s;
+            }
+          }
+        }
+        if (!t) {
+          t = Qt();
+          if (t && activeCreator && activeCreator !== "unknown") {
+            t.creator = activeCreator;
           }
         }
       }
-      if (!t) {
+
+      if (!t || !t.url) {
         m(_("notify_story_failed"), "error");
         return;
       }
-      let a = t.creator,
-        o = t.postId.replace(/^(story_|highlight_)/, ""),
-        r = await w({
+
+      let a = t.creator || activeCreator || "unknown",
+        o = t.postId ? t.postId.replace(/^(story_|highlight_)/, "") : (currentStoryId || Date.now().toString()),
+        postTypePrefix = F() ? "highlight_" : "story_",
+        fullPostId = `${postTypePrefix}${o}`;
+
+      let relayRes = await relaySingleMediaToElectron(a, fullPostId, t);
+      if (relayRes?.error) {
+        let fallbackRes = await w({
           type: "DOWNLOAD_STORY_AS_ZIP",
           payload: { username: a, storyId: o, items: [t] },
         });
-      if (r?.error) {
-        m(_("notify_download_failed", { error: r.error }), "error");
-        return;
+        if (fallbackRes?.error) {
+          m(_("notify_download_failed", { error: fallbackRes.error }), "error");
+          return;
+        }
       }
+
       m(_("notify_story_success"), "success", !0);
     } catch (t) {
       m(_("notify_download_failed", { error: D(t.message) }), "error");
@@ -13737,36 +14856,50 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
         n = "",
         a = "",
         o = F();
+      let activeCreator = getActiveStoryCreator();
       if (o) {
         let s = aa();
         if (!s) {
           m(_("notify_highlight_id_failed"), "error");
           return;
         }
-        let d = await new N("unknown").fetchHighlightItems(s);
+        let d = await new N(activeCreator || "unknown").fetchHighlightItems(s);
+        let highlightUser = d.username || activeCreator || "unknown";
         ((t = d.items.map((g, f) => ({
           ...g,
           index: f,
+          creator: highlightUser,
           postId: g.postId.replace(/^story_/, "highlight_"),
         }))),
-          (n = d.username));
+          (n = highlightUser));
         let c = be(d.title || _("highlight_untitled")),
           u = new Date(),
           p = `${u.getFullYear()}-${String(u.getMonth() + 1).padStart(2, "0")}-${String(u.getDate()).padStart(2, "0")}`;
         a = `${n}_highlight_${c}_${p}.zip`;
       } else {
-        if (((n = Ce() || ""), !n)) {
+        n = (activeCreator && activeCreator !== "unknown") ? activeCreator : (Ce() || "");
+        if (!n || n === "unknown") {
           m(_("notify_username_failed"), "error");
           return;
         }
-        let s = new N(n),
-          l = await s.getUserId(n);
-        if (!l) {
-          m(_("notify_user_data_failed"), "error");
-          return;
+        let s = new N(n);
+        t = await s.fetchUserStories(n);
+        if (!t || t.length === 0) {
+          let l = await s.getUserId(n);
+          if (l && l !== n) {
+            t = await s.fetchUserStories(l);
+          }
         }
-        ((t = await s.fetchUserStories(l)),
-          (t = t.map((u, p) => ({ ...u, index: p }))));
+        if (!t || t.length === 0) {
+          t = extractStoriesFromPageScripts(n);
+        }
+        if (!t || t.length === 0) {
+          let currentSingle = Qt();
+          if (currentSingle) {
+            t = [currentSingle];
+          }
+        }
+        t = (t || []).map((u, p) => ({ ...u, index: p, creator: n }));
         let d = new Date(),
           c = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
         a = `${n}_stories_${c}.zip`;
@@ -13790,6 +14923,88 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
       ((i.innerHTML = e), (i.style.pointerEvents = ""));
     }
   }
+  async function collectAndIngestExtras(taskId, username, includeStories, includeHighlights, isOnlyExtras = false) {
+    if (!includeStories && !includeHighlights) {
+      if (isOnlyExtras) {
+        await w({ type: "INGEST_EXTRAS_ITEMS", payload: { taskId, username, items: [], isFinal: true } });
+      }
+      return;
+    }
+    try {
+      let t = new N(username);
+      let userId = await t.getUserId(username);
+      if (!userId) {
+        let info = await resolveProfileUserInfo(username);
+        userId = info?.userId;
+      }
+      if (!userId) {
+        console.warn("[Dog Saver] Não foi possível resolver o ID do usuário para Stories/Destaques.");
+        if (isOnlyExtras) {
+          m("Não foi possível obter o ID do perfil para Destaques/Stories.", "error");
+          await w({ type: "INGEST_EXTRAS_ITEMS", payload: { taskId, username, items: [], isFinal: true } });
+        }
+        return;
+      }
+
+      let allItems = [];
+
+      // 1. Stories ativos (24h)
+      if (includeStories) {
+        try {
+          let stories = await t.fetchUserStories(userId);
+          if (Array.isArray(stories) && stories.length > 0) {
+            allItems.push(...stories);
+          }
+        } catch (err) {
+          console.warn("[Dog Saver] Erro ao obter stories:", err);
+        }
+      }
+
+      // 2. Destaques (Highlights)
+      if (includeHighlights) {
+        try {
+          let tray = await t.fetchHighlightsTray(userId);
+          if (Array.isArray(tray) && tray.length > 0) {
+            for (let c of tray) {
+              let hData = await t.fetchHighlightReelItems(c.id);
+              let title = hData.title || c.title || "Destaques";
+              if (Array.isArray(hData.items)) {
+                for (let it of hData.items) {
+                  allItems.push({
+                    ...it,
+                    highlightTitle: title,
+                    postId: it.postId.replace(/^story_/, "highlight_"),
+                  });
+                }
+              }
+            }
+          }
+        } catch (err) {
+          console.warn("[Dog Saver] Erro ao obter destaques:", err);
+        }
+      }
+
+      await w({
+        type: "INGEST_EXTRAS_ITEMS",
+        payload: {
+          taskId,
+          username,
+          items: allItems,
+          isFinal: isOnlyExtras,
+        },
+      });
+      console.log(`[Dog Saver] ${allItems.length} mídias de Stories/Destaques enviadas ao pacote.`);
+      if (allItems.length === 0 && isOnlyExtras) {
+        m("Nenhum Story ou Destaque encontrado para este perfil.", "error");
+      }
+    } catch (err) {
+      console.warn("[Dog Saver] Erro em collectAndIngestExtras:", err);
+      if (isOnlyExtras) {
+        await w({ type: "INGEST_EXTRAS_ITEMS", payload: { taskId, username, items: [], isFinal: true } });
+      }
+    }
+  }
+
   function sa() {
     let i = new Date();
     return `${i.getFullYear()}-${String(i.getMonth() + 1).padStart(2, "0")}-${String(i.getDate()).padStart(2, "0")}`;
@@ -13804,6 +15019,10 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
     try {
       M(_("progress_extras_start"));
       let a = await t.getUserId(i);
+      if (!a) {
+        let info = await resolveProfileUserInfo(i);
+        a = info?.userId;
+      }
       if (!a) {
         m(_("notify_user_data_failed"), "error");
         return;
@@ -14120,28 +15339,48 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
   }
   function ea(i, e, t, n) {
     let a = i.cloneNode(!1);
-    ((a.id = e), a.removeAttribute("data-visualcompletion"));
+    a.id = e;
+    a.removeAttribute("data-visualcompletion");
     let o = i.querySelector(":scope > div"),
       r = o ? o.cloneNode(!1) : document.createElement("div");
-    ((r.style.display = "flex"),
-      (r.style.alignItems = "center"),
-      (r.style.justifyContent = "center"));
+    r.style.display = "flex";
+    r.style.alignItems = "center";
+    r.style.justifyContent = "center";
     let s = `
-    <svg aria-label="${_("aria_download")}" fill="currentColor" height="${t}" role="img" viewBox="0 0 24 24" width="${t}" style="color:white;">
+    <svg aria-label="${_("aria_download")}" fill="currentColor" height="${t}" role="img" viewBox="0 0 24 24" width="${t}" style="color:white;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.3));">
       <title>${_("aria_download")}</title>
-      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-      <polyline points="7 10 12 15 17 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-      <line x1="12" y1="15" x2="12" y2="3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <polyline points="7 10 12 15 17 10" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <line x1="12" y1="15" x2="12" y2="3" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>`;
+    a.style.transition = "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)";
+    a.style.cursor = "pointer";
     if (n) {
-      ((r.innerHTML = s), a.appendChild(r));
+      r.innerHTML = s;
+      a.appendChild(r);
       let l = document.createElement("span");
-      ((l.textContent = n),
-        (l.style.cssText =
-          'color:white;font-size:12px;font-weight:500;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;white-space:nowrap;'),
-        (a.style.gap = "4px"),
-        a.appendChild(l));
-    } else ((r.innerHTML = s), a.appendChild(r));
+      l.textContent = n;
+      l.style.cssText =
+        'color:white;font-size:12px;font-weight:600;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;white-space:nowrap;';
+      a.style.gap = "6px";
+      a.style.padding = "4px 10px";
+      a.style.borderRadius = "9999px";
+      a.appendChild(l);
+    } else {
+      r.innerHTML = s;
+      a.style.borderRadius = "50%";
+      a.appendChild(r);
+    }
+    a.addEventListener("mouseenter", () => {
+      a.style.background = "#0071e3";
+      a.style.transform = n ? "scale(1.05)" : "scale(1.1)";
+      a.style.boxShadow = "0 4px 16px rgba(0, 113, 227, 0.45)";
+    });
+    a.addEventListener("mouseleave", () => {
+      a.style.background = "transparent";
+      a.style.transform = "scale(1)";
+      a.style.boxShadow = "none";
+    });
     return a;
   }
   var Je = !1,
@@ -14221,8 +15460,22 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
             wrappedNode?.media ??
             wrappedNode?.post ??
             wrappedNode,
-          normalized = normalizeInterceptedNodeInline(node),
-          postId = normalized.shortcode || normalized.id,
+          normalized = normalizeInterceptedNodeInline(node);
+        
+        let postOwner =
+          normalized.user?.username ||
+          normalized.owner?.username ||
+          node.user?.username ||
+          node.owner?.username ||
+          "";
+        if (username && username !== "unknown" && postOwner) {
+          if (postOwner.toLowerCase() !== username.toLowerCase()) {
+            // Descartar posts/vídeos de outros criadores interceptados
+            continue;
+          }
+        }
+
+        let postId = normalized.shortcode || normalized.id,
           timestamp = normalized.taken_at_timestamp || 0,
           isCarousel =
             normalized.__typename === "GraphSidecar" ||
@@ -14241,13 +15494,7 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
               type: isVideo ? "video" : "image",
               url: (isVideo && videoUrl ? videoUrl : imageUrl || videoUrl) || "",
               timestamp,
-              creator:
-                normalized.user?.username ||
-                normalized.owner?.username ||
-                node.user?.username ||
-                node.owner?.username ||
-                username ||
-                "unknown",
+              creator: username || postOwner || "unknown",
             };
           }).filter((media) => media.url);
         posts.push({
@@ -14263,6 +15510,7 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
           commentCount: normalized.commentCount,
           saveCount: normalized.saveCount,
           captionText: normalized.captionText,
+          creator: username || postOwner || "unknown",
         });
       } catch (err) {
         console.warn("[Dog Saver] Inline parser skipped item:", err?.message || err);
@@ -14343,7 +15591,11 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
       }
     });
     async function cacheInterceptedPostsInline(posts, pagination, username) {
-        if (!posts || posts.length === 0) return;
+        let cleanPosts = (posts || []).filter(p => {
+          let postCreator = p.creator || p.mediaItems?.[0]?.creator || "";
+          return !postCreator || postCreator.toLowerCase() === username.toLowerCase();
+        });
+        if (cleanPosts.length === 0 && !pagination) return;
 
         let key = `ig_saver_cache_${username.toLowerCase()}`;
         let res = await chrome.storage.local.get(key);
@@ -14351,7 +15603,7 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
 
         let existingShortcodes = new Set(cache.posts.map(p => p.shortcode || p.postId));
         let addedAny = false;
-        for (let p of posts) {
+        for (let p of cleanPosts) {
           let pKey = p.shortcode || p.postId;
           if (pKey && !existingShortcodes.has(pKey)) {
             cache.posts.push(p);
@@ -14366,9 +15618,12 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
             cache.hasNextPage = pagination.hasNextPage;
             paginationChanged = true;
           }
-          if (pagination.endCursor && !cache.cursors.includes(pagination.endCursor)) {
-            cache.cursors.push(pagination.endCursor);
-            paginationChanged = true;
+          if (pagination.endCursor && typeof pagination.endCursor === "string") {
+            if (!cache.cursors.includes(pagination.endCursor)) {
+              cache.cursors.push(pagination.endCursor);
+              paginationChanged = true;
+            }
+            cache.cursor = pagination.endCursor;
           }
         }
         if (!addedAny && !paginationChanged) return;
@@ -14394,11 +15649,23 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
                     ? U()
                     : _e() && ot());
     let i = window.location.pathname;
+    async function restoreActiveTaskWidgetIfNeeded() {
+      if (document.getElementById("ig-saver-status")) return;
+      try {
+        let tasksRes = await w({ type: "GET_TASKS" });
+        let activeTask = tasksRes?.tasks?.find(t => t.status === "running" || t.status === "paused");
+        if (activeTask && !document.getElementById("ig-saver-status")) {
+          he(activeTask.taskId, activeTask.username, activeTask.profilePicUrl);
+        }
+      } catch {}
+    }
     function e(l) {
-      if (l !== i)
-        if (((!W() && removeProfileActions()), (i = l), W()))
+      if (l !== i) {
+        if (!W()) removeProfileActions();
+        i = l;
+        if (W()) {
           (R(), $(), Ee(), at(), Ve(), Qe());
-        else if (J()) {
+        } else if (J()) {
           (R(), $());
           let d = document.getElementById("ig-saver-btn");
           d && d.remove();
@@ -14432,6 +15699,8 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
           let c = document.getElementById("ig-saver-avatar-btn");
           (c && c.remove(), R(), Ye(), $(), Ee());
         }
+        restoreActiveTaskWidgetIfNeeded();
+      }
     }
     let t = history.pushState.bind(history);
     history.pushState = function (...l) {
@@ -14459,7 +15728,10 @@ ${_("status_scanned_to", { date: tn(e.oldestTs) })}`),
       mutationScanPending = true;
       setTimeout(() => {
         mutationScanPending = false;
-        if ((e(window.location.pathname), W())) (Ve(), Qe());
+        if ((e(window.location.pathname), W())) {
+          (at(), Ve(), Qe());
+          if (document.querySelector('div[role="dialog"]')) st();
+        }
         else if (J()) je();
         else if (ee()) Xe();
         else if (de()) rn();

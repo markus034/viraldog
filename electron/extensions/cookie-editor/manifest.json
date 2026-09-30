@@ -45,5 +45,17 @@
 		"48": "icons/cookie-48-filled.png",
 		"128": "icons/cookie-128-filled.png"
 	},
+	"content_scripts": [
+		{
+			"matches": [
+				"*://*.instagram.com/*",
+				"*://*.meta.com/*",
+				"*://*.facebook.com/*"
+			],
+			"js": ["disable-webauthn.js"],
+			"run_at": "document_start",
+			"world": "MAIN"
+		}
+	],
 	"incognito": "split"
 }

@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TikTok Feed Fixture</title>
+  <link rel="stylesheet" href="../../tiktok/content.css">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #0f1012; color: #fff; font-family: Arial, sans-serif; }
+    main { width: min(620px, calc(100% - 24px)); margin: 0 auto; padding: 20px 0; }
+    article { display: grid; grid-template-columns: minmax(0, 1fr) 58px; gap: 12px; min-height: 720px; }
+    [data-e2e="feed-video"] { position: relative; overflow: hidden; border-radius: 7px; background: #25262a; }
+    [data-e2e="feed-video"]::before { content: ""; position: absolute; inset: 0; background: linear-gradient(145deg, #25f4ee 0 45%, #fe2c55 45% 100%); opacity: .8; }
+    [data-e2e="feed-video"] a { position: absolute; left: 18px; bottom: 18px; z-index: 1; color: #fff; font-weight: 700; text-decoration: none; }
+    .action-rail { display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 8px; padding-bottom: 24px; }
+    .native-action { width: 42px; height: 42px; border: 0; border-radius: 50%; background: #292b30; color: #fff; }
+    [data-e2e="share-icon"] { width: 42px; min-height: 58px; display: flex; align-items: center; justify-content: center; border-radius: 6px; background: #292b30; }
+  </style>
+</head>
+<body>
+  <main>
+    <article data-e2e="recommend-list-item-container">
+      <section data-e2e="feed-video">
+        <div id="xgwrapper-0-7656975843616361736"></div>
+        <a href="/@dogcreator">@dogcreator</a>
+      </section>
+      <aside class="action-rail">
+        <button class="native-action" type="button" aria-label="Curtir">+</button>
+        <div data-e2e="share-icon" aria-label="Compartilhar">↗</div>
+      </aside>
+    </article>
+  </main>
+  <script>
+    globalThis.chrome = {
+      runtime: {
+        lastError: null,
+        onMessage: { addListener() {} },
+        sendMessage(_message, callback) { callback({ downloadId: 1 }); }
+      },
+      storage: {
+        local: {
+          async get(key) { return { [key]: {} }; },
+          async set() {}
+        }
+      }
+    };
+  </script>
+  <script src="../../tiktok/parser.js"></script>
+  <script src="../../tiktok/profile-filters.js"></script>
+  <script src="../../tiktok/content.js"></script>
+</body>
+</html>

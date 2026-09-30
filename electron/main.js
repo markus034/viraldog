@@ -14,6 +14,11 @@ const { chromeUA, configureChromeSession } = require('./browser-identity')
 // apareça corretamente na barra de tarefas (Taskbar).
 app.setAppUserModelId('com.viraldog.desktop')
 
+// Desativar WebAuthn / Passkeys nativos do Windows Hello para evitar o popup de chave de segurança USB
+app.commandLine.appendSwitch('disable-features', 'WebAuthentication,WebAuthenticationConditionalUI,WebAuthenticationResidentKeys,WebAuthenticationNewPasskeyUI,PasskeyManagement,WebAuthenticationClientCapabilities,WebAuthenticationHybridLink,WebAuthenticationPhoneSupport')
+app.commandLine.appendSwitch('disable-webauthn')
+app.commandLine.appendSwitch('disable-fido-u2f-request')
+
 // ── Registro de Protocolo Deep Link (viraldog://) ───────────────────────────
 if (process.defaultApp) {
   if (process.argv.length >= 2) {
@@ -41,7 +46,7 @@ if (!gotTheLock) {
   })
 }
 
-function handleDeepLinkUrl(urlStr) {
+function handleDeepLinkUrl(urlStr, onComplete) {
   try {
     console.log('[DeepLink] Recebido:', urlStr)
     // Se a URL contiver code de autorização, despachar também para o backend local
@@ -49,15 +54,51 @@ function handleDeepLinkUrl(urlStr) {
       const qs = urlStr.includes('?') ? urlStr.split('?')[1] : urlStr.replace(/^viraldog:\/\/auth\/callback\??/, '')
       if (qs) {
         http.get(`http://127.0.0.1:8000/auth/callback?${qs}`, (res) => {
-          console.log('[Electron OAuth] Callback despachado ao backend local, status:', res.statusCode)
-        }).on('error', (err) => console.error('[Electron OAuth] Erro ao despachar callback local:', err.message))
+          let body = ''
+          res.on('data', chunk => { body += chunk })
+          res.on('end', () => {
+            const isSuccess = res.statusCode < 400 && !body.includes('Falha na Conexão') && !body.includes('Erro na Autorização')
+            console.log('[Electron OAuth] Callback despachado ao backend local, status:', res.statusCode, 'success:', isSuccess)
+            let extractedError = 'Falha na validação do token do Instagram'
+            if (!isSuccess) {
+              const pMatch = body.match(/<p[^>]*>(.*?)<\/p>/i)
+              if (pMatch && pMatch[1]) {
+                extractedError = pMatch[1].replace(/<[^>]*>/g, '').trim()
+              }
+            }
+            if (mainWindow && mainWindow.webContents) {
+              mainWindow.webContents.send('meta-oauth-complete', {
+                url: urlStr,
+                status: res.statusCode,
+                success: isSuccess,
+                error: isSuccess ? null : extractedError
+              })
+            }
+            if (typeof onComplete === 'function') onComplete({ success: isSuccess, error: extractedError })
+          })
+        }).on('error', (err) => {
+          console.error('[Electron OAuth] Erro ao despachar callback local:', err.message)
+          if (mainWindow && mainWindow.webContents) {
+            mainWindow.webContents.send('meta-oauth-complete', {
+              url: urlStr,
+              error: err.message,
+              success: false
+            })
+          }
+          if (typeof onComplete === 'function') onComplete({ success: false, error: err.message })
+        })
+      } else {
+        if (typeof onComplete === 'function') onComplete({ success: false })
       }
-    }
-    if (mainWindow && mainWindow.webContents) {
-      mainWindow.webContents.send('meta-oauth-complete', { url: urlStr })
+    } else {
+      if (mainWindow && mainWindow.webContents) {
+        mainWindow.webContents.send('meta-oauth-complete', { url: urlStr, success: true })
+      }
+      if (typeof onComplete === 'function') onComplete({ success: true })
     }
   } catch (e) {
     console.error('[DeepLink] Erro:', e)
+    if (typeof onComplete === 'function') onComplete({ success: false, error: e.message })
   }
 }
 
@@ -370,13 +411,18 @@ async function createWindow() {
     }
   })
 
-  // Gerenciar popups de login (Meta OAuth) e fechar automaticamente após callback
+  // Gerenciar popups de login (Meta OAuth) como Modal nativo e fechar automaticamente após callback
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     return {
       action: 'allow',
       overrideBrowserWindowOptions: {
-        width: 620,
-        height: 740,
+        parent: mainWindow,
+        modal: true,
+        width: 580,
+        height: 720,
+        center: true,
+        title: 'Conectar Instagram Oficial — ViralDog',
+        backgroundColor: '#0D0F17',
         autoHideMenuBar: true,
         webPreferences: {
           nodeIntegration: false,
@@ -387,19 +433,29 @@ async function createWindow() {
   })
 
   mainWindow.webContents.on('did-create-window', (childWindow) => {
-    const checkAndIntercept = (targetUrl) => {
-      if (!targetUrl) return
+    childWindow.setTitle('Conectar Instagram Oficial — ViralDog')
+    let callbackProcessed = false
+
+    const checkAndIntercept = (event, targetUrl) => {
+      if (!targetUrl || callbackProcessed) return
       if (targetUrl.includes('/auth/callback') || targetUrl.startsWith('viraldog://')) {
-        console.log('[Electron OAuth Popup] Callback detectado:', targetUrl)
-        handleDeepLinkUrl(targetUrl)
-        setTimeout(() => {
-          try { childWindow.close() } catch {}
-        }, 1200)
+        callbackProcessed = true
+        if (event && event.preventDefault) {
+          try { event.preventDefault() } catch {}
+        }
+        console.log('[Electron OAuth Popup] Callback detectado (único):', targetUrl)
+        handleDeepLinkUrl(targetUrl, () => {
+          setTimeout(() => {
+            try {
+              if (!childWindow.isDestroyed()) childWindow.close()
+            } catch {}
+          }, 600)
+        })
       }
     }
-    childWindow.webContents.on('will-navigate', (e, u) => checkAndIntercept(u))
-    childWindow.webContents.on('will-redirect', (e, u) => checkAndIntercept(u))
-    childWindow.webContents.on('did-navigate', (e, u) => checkAndIntercept(u))
+    childWindow.webContents.on('will-navigate', (e, u) => checkAndIntercept(e, u))
+    childWindow.webContents.on('will-redirect', (e, u) => checkAndIntercept(e, u))
+    childWindow.webContents.on('did-navigate', (e, u) => checkAndIntercept(null, u))
   })
 
   mainWindow.maximize()
@@ -460,10 +516,48 @@ async function createWindow() {
       }
     })
 
+  function terminateBackend() {
+    if (pyProc && pyProc.pid) {
+      try {
+        if (process.platform === 'win32') {
+          const { execSync } = require('child_process')
+          execSync(`taskkill /pid ${pyProc.pid} /T /F`, { stdio: 'ignore' })
+        } else {
+          pyProc.kill('SIGKILL')
+        }
+      } catch (e) {}
+      pyProc = null
+    }
+  }
+
+  // Pausar reprodução de qualquer mídia ao minimizar, perder foco ou ocultar janela
+  const broadcastPauseMedia = () => {
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
+      mainWindow.webContents.send('pause-all-media')
+    }
+    if (typeof igBrowser.pauseIgMedia === 'function') {
+      igBrowser.pauseIgMedia()
+    }
+  }
+
+  mainWindow.on('minimize', broadcastPauseMedia)
+  mainWindow.on('blur', broadcastPauseMedia)
+  mainWindow.on('hide', broadcastPauseMedia)
+
+  mainWindow.on('close', () => {
+    broadcastPauseMedia()
+    igBrowser.cleanupIgView()
+    extensionPolyfills.closeAllOffscreenWindows()
+    terminateBackend()
+  })
+
   mainWindow.on('closed', () => {
     mainWindow = null
     downloadManager.setMainWindow(null)
     igBrowser.cleanupIgView()
+    extensionPolyfills.closeAllOffscreenWindows()
+    terminateBackend()
+    app.exit(0)
   })
 }
 
@@ -513,5 +607,27 @@ app.whenReady().then(() => {
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() })
 })
 
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
-app.on('will-quit', () => { if (pyProc) pyProc.kill() })
+app.on('before-quit', () => {
+  igBrowser.cleanupIgView()
+  extensionPolyfills.closeAllOffscreenWindows()
+})
+
+app.on('window-all-closed', () => {
+  igBrowser.cleanupIgView()
+  extensionPolyfills.closeAllOffscreenWindows()
+  app.exit(0)
+})
+
+app.on('will-quit', () => {
+  try {
+    if (pyProc && pyProc.pid) {
+      if (process.platform === 'win32') {
+        const { execSync } = require('child_process')
+        execSync(`taskkill /pid ${pyProc.pid} /T /F`, { stdio: 'ignore' })
+      } else {
+        pyProc.kill('SIGKILL')
+      }
+    }
+  } catch (e) {}
+  process.exit(0)
+})

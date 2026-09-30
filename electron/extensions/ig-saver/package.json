@@ -1,0 +1,12 @@
+{
+  "name": "dog-saver-extension",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node tests/parser.test.mjs && node tests/instagram-interceptor.test.mjs && node tests/tiktok-parser.test.mjs && node tests/tiktok-filters.test.mjs && node tests/tiktok-security.test.mjs && node tests/tiktok-media-validation.test.mjs && node tests/tiktok-page-download.test.mjs && node tests/tiktok-profile-zip.test.mjs && node tests/tiktok-manifest.test.mjs && node tests/tiktok-ux.test.mjs && node tests/utf8.test.mjs",
+    "test:parser": "node tests/parser.test.mjs",
+    "test:tiktok": "node tests/tiktok-parser.test.mjs && node tests/tiktok-filters.test.mjs && node tests/tiktok-security.test.mjs && node tests/tiktok-media-validation.test.mjs && node tests/tiktok-page-download.test.mjs && node tests/tiktok-profile-zip.test.mjs && node tests/tiktok-manifest.test.mjs && node tests/tiktok-ux.test.mjs",
+    "test:utf8": "node tests/utf8.test.mjs"
+  }
+}

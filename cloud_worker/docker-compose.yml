@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  cloud_worker:
+    build: .
+    container_name: viraldog_cloud_worker
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      - WORKER_SECRET_KEY=viraldog-cloud-secret-2026
+      - DATABASE_URL=sqlite:///./worker.db
+    volumes:
+      - worker_data:/app
+
+volumes:
+  worker_data:

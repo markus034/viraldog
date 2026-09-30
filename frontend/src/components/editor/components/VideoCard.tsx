@@ -48,8 +48,16 @@ export default function VideoCard({ job, template, onCalibrate, onRemove, onTogg
       setSelectedElement('none');
     };
 
+    const handleGlobalPause = () => {
+      setIsPlaying(false);
+    };
+
     document.addEventListener('mousedown', handleOutsideClick);
-    return () => document.removeEventListener('mousedown', handleOutsideClick);
+    window.addEventListener('viraldog:pause-all-media', handleGlobalPause);
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+      window.removeEventListener('viraldog:pause-all-media', handleGlobalPause);
+    };
   }, []);
 
   // Drag handler for text overlay box
@@ -306,13 +314,22 @@ export default function VideoCard({ job, template, onCalibrate, onRemove, onTogg
           </div>
         );
       case 'renderizando':
+      case 'salvando':
         return (
-          <div className="absolute inset-0 bg-slate-950/85 backdrop-blur-sm flex flex-col items-center justify-center gap-2 z-20">
+          <div className="absolute inset-0 bg-slate-950/85 backdrop-blur-sm flex flex-col items-center justify-center gap-2 p-3 text-center z-20">
             <RefreshCw className="w-6 h-6 text-emerald-400 animate-spin" />
-            <p className="text-[9px] font-mono text-emerald-400 uppercase tracking-widest font-semibold animate-pulse">Renderizando... {job.progress}%</p>
-            <div className="w-3/4 bg-slate-700 h-1 rounded-full overflow-hidden mt-1">
-              <div className="bg-emerald-400 h-full rounded-full transition-all duration-300" style={{ width: `${job.progress}%` }} />
+            <p className="text-[10px] font-mono text-emerald-400 uppercase tracking-widest font-bold animate-pulse">
+              Salvando... {job.progress || 0}%
+            </p>
+            <div className="w-4/5 bg-slate-800 h-1.5 rounded-full overflow-hidden mt-1 border border-white/10">
+              <div
+                className="bg-gradient-to-r from-emerald-500 to-teal-400 h-full rounded-full transition-all duration-300 shadow-[0_0_8px_rgba(16,185,129,0.5)]"
+                style={{ width: `${Math.max(5, job.progress || 0)}%` }}
+              />
             </div>
+            <p className="text-[8px] font-mono text-slate-400 truncate max-w-[90%] mt-1">
+              {job.details || 'Processando com FFmpeg...'}
+            </p>
           </div>
         );
       case 'compondo':

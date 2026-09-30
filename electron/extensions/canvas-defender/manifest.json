@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Canvas & WebGL Defender",
+  "version": "1.3.4",
+  "description": "Proteção ativa contra fingerprinting gráfico e canvas tracking.",
+  "permissions": ["scripting"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
+}

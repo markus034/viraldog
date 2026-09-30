@@ -4,36 +4,43 @@
  */
 const { BrowserWindow, session } = require('electron')
 
-let offscreenWin = null
+const offscreenWindows = new Map()
 
-async function ensureOffscreenWindow(extensionPath) {
-  if (offscreenWin && !offscreenWin.isDestroyed()) return
+async function ensureOffscreenWindow(extensionPath, targetSession = session.defaultSession) {
+  const sess = targetSession || session.defaultSession
+  const existingWin = offscreenWindows.get(sess)
+  if (existingWin && !existingWin.isDestroyed()) return
 
-  const extensions = session.defaultSession.getAllExtensions()
+  const extensions = sess.getAllExtensions ? sess.getAllExtensions() : session.defaultSession.getAllExtensions()
   const igSaverExt = extensions.find(ext => ext.path.replace(/\\/g, '/').includes('ig-saver'))
   if (!igSaverExt) {
-    console.log('[Offscreen] Extensão IG Saver não encontrada, pulando polyfill')
+    console.log('[Offscreen] Extensão IG Saver não encontrada na sessão, pulando polyfill')
     return
   }
 
-  offscreenWin = new BrowserWindow({
+  const offscreenWin = new BrowserWindow({
     show: false, width: 1, height: 1,
-    webPreferences: { nodeIntegration: false, contextIsolation: false, session: session.defaultSession }
+    webPreferences: { nodeIntegration: false, contextIsolation: false, session: sess }
   })
+  offscreenWindows.set(sess, offscreenWin)
 
   const offscreenUrl = `chrome-extension://${igSaverExt.id}/offscreen.html`
   try {
     await offscreenWin.loadURL(offscreenUrl)
-    console.log(`[Offscreen] Polyfill carregado: ${offscreenUrl}`)
+    console.log(`[Offscreen] Polyfill carregado para sessão: ${offscreenUrl}`)
   } catch (err) {
-    console.error('[Offscreen] Falha:', err.message)
+    console.error('[Offscreen] Falha ao carregar URL da extensão:', err.message)
     try {
       await offscreenWin.loadURL(`file://${extensionPath.replace(/\\/g, '/')}/offscreen.html`)
     } catch (err2) {
       console.error('[Offscreen] Fallback falhou:', err2.message)
     }
   }
-  offscreenWin.on('closed', () => { offscreenWin = null })
+  offscreenWin.on('closed', () => {
+    if (offscreenWindows.get(sess) === offscreenWin) {
+      offscreenWindows.delete(sess)
+    }
+  })
 }
 
 const POLYFILL_CODE = `
@@ -84,4 +91,15 @@ function setupPolyfillInjection(loadedExtension) {
   }
 }
 
-module.exports = { ensureOffscreenWindow, injectOffscreenPolyfill, setupPolyfillInjection }
+function closeAllOffscreenWindows() {
+  for (const [sess, win] of offscreenWindows.entries()) {
+    try {
+      if (win && !win.isDestroyed()) {
+        win.destroy()
+      }
+    } catch {}
+  }
+  offscreenWindows.clear()
+}
+
+module.exports = { ensureOffscreenWindow, injectOffscreenPolyfill, setupPolyfillInjection, closeAllOffscreenWindows }

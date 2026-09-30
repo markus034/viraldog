@@ -27,46 +27,32 @@ export default function AuthCallbackPage() {
 
     const deepLinkUrl = `viraldog://auth/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state || "")}`;
 
-    // 1. Tentar despachar para o backend local (porta 8000) e também tentar abrir Deep Link
     const syncCallback = async () => {
-      try {
-        // Tenta enviar para o backend local do usuário
-        const targetUrl = `http://localhost:8000/auth/callback?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state || "")}`;
-        const res = await fetch(targetUrl);
-        if (res.ok) {
-          setStatus("success");
-          setMessage("Conta conectada com sucesso no ViralDog!");
-        } else {
-          // Se o backend local não respondeu, dispara o deep link
-          setStatus("success");
-          setMessage("Autorização concluída! Retornando ao ViralDog...");
+      setStatus("success");
+      setMessage("Autorização concluída! Retornando ao ViralDog...");
+
+      // 1. Se foi aberto via window.open (popup modal), notificar janela pai diretamente
+      if (window.opener) {
+        try {
+          window.opener.postMessage({
+            type: "META_OAUTH_CODE",
+            code,
+            state
+          }, "*");
+        } catch (e) {
+          console.log("Erro ao postar mensagem para opener:", e);
         }
-      } catch {
-        setStatus("success");
-        setMessage("Autorização concluída! Retornando ao ViralDog...");
+        setTimeout(() => {
+          try { window.close(); } catch {}
+        }, 1200);
+        return;
       }
 
-      // Disparar Deep Link para o Electron
+      // 2. Se NÃO houver opener (abertura externa ou navegador completo), dispara o Deep Link para o Electron
       try {
         window.location.href = deepLinkUrl;
       } catch (e) {
-        console.log(e);
-      }
-
-      // Notificar janela pai se aberta via window.open
-      if (window.opener) {
-        window.opener.postMessage({
-          type: "META_OAUTH_CODE",
-          code,
-          state
-        }, "*");
-      }
-
-      // Fechar popup após 3 segundos se for janela filha
-      if (window.opener) {
-        setTimeout(() => {
-          try { window.close(); } catch {}
-        }, 3000);
+        console.log("Erro ao acionar deep link:", e);
       }
     };
 

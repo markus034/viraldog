@@ -34,12 +34,29 @@ const downloadedShortcodes = new Set()
 // which contain the profile name as the first path segment. We store these
 // before calling downloadURL() so the will-download handler can use them.
 const pendingFilenames = new Map()
+const pendingHistory = []
 const sessionProfiles = new WeakMap()
 const reservedVideoNumbers = new Map()
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.webm', '.mkv', '.avi'])
 
+function normalizeUrl(url) {
+  if (!url || typeof url !== 'string') return ''
+  try {
+    const u = new URL(url)
+    return `${u.origin}${u.pathname}`
+  } catch {
+    return url.split('?')[0]
+  }
+}
+
 function setPendingFilename(url, filename) {
-  if (url && filename) pendingFilenames.set(url, filename)
+  if (url && filename) {
+    pendingFilenames.set(url, filename)
+    const norm = normalizeUrl(url)
+    if (norm && norm !== url) pendingFilenames.set(norm, filename)
+    pendingHistory.push({ url, normalizedUrl: norm, filename, ts: Date.now() })
+    if (pendingHistory.length > 50) pendingHistory.shift()
+  }
 }
 
 /**
@@ -47,15 +64,40 @@ function setPendingFilename(url, filename) {
  * Returns the filename if found, or null.
  */
 function consumePendingFilename(url) {
-  const fn = pendingFilenames.get(url)
-  if (fn) pendingFilenames.delete(url)
-  return fn || null
+  if (!url) return null
+  let fn = pendingFilenames.get(url)
+  if (fn) {
+    pendingFilenames.delete(url)
+    return fn
+  }
+  const norm = normalizeUrl(url)
+  if (norm) {
+    fn = pendingFilenames.get(norm)
+    if (fn) {
+      pendingFilenames.delete(norm)
+      return fn
+    }
+  }
+  // Fallback: check recent pending history within 15 seconds for URL or normalized URL match
+  const now = Date.now()
+  for (let i = pendingHistory.length - 1; i >= 0; i--) {
+    const item = pendingHistory[i]
+    if (now - item.ts > 15000) {
+      pendingHistory.splice(0, i + 1)
+      break
+    }
+    if (item.url === url || (norm && item.normalizedUrl === norm)) {
+      pendingHistory.splice(i, 1)
+      return item.filename
+    }
+  }
+  return null
 }
 
 function sanitizeProfileName(value) {
   if (typeof value !== 'string') return null
   const username = value.trim().replace(/^@+/, '')
-  const validShape = /^[A-Za-z0-9_](?:[A-Za-z0-9._]{0,28}[A-Za-z0-9_])?$/.test(username)
+  const validShape = /^[A-Za-z0-9_](?:[A-Za-z0-9._-]{0,28}[A-Za-z0-9_-])?$/.test(username) || /^[A-Za-z0-9_.-]{1,30}$/.test(username)
   return validShape && !username.includes('..') ? username : null
 }
 
@@ -64,13 +106,20 @@ function resolveProfileName(fileName, extensionPath) {
     const segments = extensionPath.replace(/\\/g, '/').split('/').filter(Boolean)
     if (segments.length > 1) return sanitizeProfileName(segments[0])
 
-    const structuredName = segments[0] || ''
-    const structuredMatch = structuredName.match(/^@?([A-Za-z0-9._]{1,30})_(?:instagram|stories|highlights)(?:_|\.zip)/i)
+    const structuredName = path.basename(segments[0] || '', path.extname(segments[0] || ''))
+    const ttPrefixMatch = structuredName.match(/^(?:Dog_Saver_TikTok_|TikTok_)(@?[A-Za-z0-9._-]{1,30})/i)
+    if (ttPrefixMatch) return sanitizeProfileName(ttPrefixMatch[1])
+    const structuredMatch = structuredName.match(/^@?([A-Za-z0-9._-]{1,30})_(?:instagram|tiktok|stories|highlights)(?:_|$)/i)
     if (structuredMatch) return sanitizeProfileName(structuredMatch[1])
   }
 
-  const zipMatch = String(fileName || '').match(/^@?([A-Za-z0-9._]{1,30})_(?:instagram|stories|highlights)(?:_|\.zip)/i)
-  return zipMatch ? sanitizeProfileName(zipMatch[1]) : null
+  const strFileName = String(fileName || '')
+  const baseWithoutExt = path.basename(strFileName, path.extname(strFileName))
+  const ttPrefixMatch = baseWithoutExt.match(/^(?:Dog_Saver_TikTok_|TikTok_)(@?[A-Za-z0-9._-]{1,30})/i)
+  if (ttPrefixMatch) return sanitizeProfileName(ttPrefixMatch[1])
+  const zipMatch = strFileName.match(/^@?([A-Za-z0-9._-]{1,30})_(?:instagram|tiktok|stories|highlights)(?:_|\.zip)/i)
+  if (zipMatch) return sanitizeProfileName(zipMatch[1])
+  return null
 }
 
 function getOrCreateProfileDirectory(outDir, username) {
@@ -108,14 +157,22 @@ function getNumberedVideoFileName(targetDir, fileName) {
 function extractInstagramProfileFromUrl(value) {
   try {
     const url = new URL(value)
-    if (!/(^|\.)instagram\.com$/i.test(url.hostname)) return null
-    const firstSegment = url.pathname.split('/').filter(Boolean)[0]
-    const reservedRoutes = new Set([
-      'accounts', 'direct', 'explore', 'p', 'reel', 'reels', 'stories',
-      'about', 'developer', 'legal', 'privacy', 'web'
-    ])
-    if (!firstSegment || reservedRoutes.has(firstSegment.toLowerCase())) return null
-    return sanitizeProfileName(firstSegment)
+    if (/(^|\.)tiktok\.com$/i.test(url.hostname)) {
+      const parts = url.pathname.split('/').filter(Boolean)
+      if (parts.length > 0 && parts[0].startsWith('@')) {
+        return sanitizeProfileName(parts[0].slice(1))
+      }
+    }
+    if (/(^|\.)instagram\.com$/i.test(url.hostname)) {
+      const firstSegment = url.pathname.split('/').filter(Boolean)[0]
+      const reservedRoutes = new Set([
+        'accounts', 'direct', 'explore', 'p', 'reel', 'reels', 'stories',
+        'about', 'developer', 'legal', 'privacy', 'web'
+      ])
+      if (!firstSegment || reservedRoutes.has(firstSegment.toLowerCase())) return null
+      return sanitizeProfileName(firstSegment)
+    }
+    return null
   } catch (error) {
     return null
   }
@@ -176,16 +233,41 @@ function loadDownloadedShortcodes() {
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
 function fetchBuffer(url, maxRetries = 2) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
+    if (!url) { resolve(null); return }
+    if (url.startsWith('data:')) {
+      try {
+        const base64Index = url.indexOf(';base64,')
+        const data = base64Index !== -1 ? url.slice(base64Index + 8) : url.split(',')[1] || ''
+        const buf = Buffer.from(data, 'base64')
+        resolve(buf)
+      } catch (err) {
+        resolve(null)
+      }
+      return
+    }
+
+    const isTikTok = url.includes('tiktok') || url.includes('byteoversea') || url.includes('ibyteimg')
+    const referer = isTikTok ? 'https://www.tiktok.com/' : 'https://www.instagram.com/'
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
+      'Referer': referer,
+      'Accept': '*/*',
+      'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+      'Sec-Fetch-Dest': 'video',
+      'Sec-Fetch-Mode': 'no-cors',
+      'Sec-Fetch-Site': 'cross-site'
+    }
+
     const doFetch = (fetchUrl, retriesLeft, redirectCount = 0) => {
       if (redirectCount > 5) { resolve(null); return }
       const mod = fetchUrl.startsWith('https') ? https : http
-      const req = mod.get(fetchUrl, { timeout: 30000 }, (res) => {
+      const req = mod.get(fetchUrl, { timeout: 35000, headers }, (res) => {
         if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
           doFetch(res.headers.location, retriesLeft, redirectCount + 1)
           return
         }
-        if (res.statusCode !== 200) {
+        if (res.statusCode !== 200 && res.statusCode !== 206) {
           if (retriesLeft > 0 && (res.statusCode === 429 || res.statusCode >= 500)) {
             setTimeout(() => doFetch(fetchUrl, retriesLeft - 1, redirectCount), 1000 * (maxRetries - retriesLeft + 1))
           } else { resolve(null) }
@@ -213,74 +295,205 @@ function fetchBuffer(url, maxRetries = 2) {
   })
 }
 
-async function buildZipNative(username, items, options = {}) {
-  const outDir = customDownloadFolder || path.join(__dirname, '../downloads')
-  const profileDir = getOrCreateProfileDirectory(outDir, username)
-  const zipFilename = path.basename(options.filename || `${username}_instagram.zip`)
-  const zipPath = getUniqueSavePath(profileDir, zipFilename)
+function downloadFileStream(url, destPath, maxRetries = 2) {
+  return new Promise((resolve) => {
+    if (!url) { resolve(false); return }
+    if (url.startsWith('data:')) {
+      try {
+        const destDir = path.dirname(destPath)
+        if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true })
+        const base64Index = url.indexOf(';base64,')
+        const data = base64Index !== -1 ? url.slice(base64Index + 8) : url.split(',')[1] || ''
+        const buf = Buffer.from(data, 'base64')
+        fs.writeFileSync(destPath, buf)
+        resolve(true)
+      } catch (err) {
+        resolve(false)
+      }
+      return
+    }
 
-  const concurrency = options.concurrency || 3
-  let downloaded = 0, failed = 0, current = 0
+    const isTikTok = url.includes('tiktok') || url.includes('byteoversea') || url.includes('ibyteimg')
+    const referer = isTikTok ? 'https://www.tiktok.com/' : 'https://www.instagram.com/'
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
+      'Referer': referer,
+      'Accept': '*/*',
+      'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+      'Sec-Fetch-Dest': 'video',
+      'Sec-Fetch-Mode': 'no-cors',
+      'Sec-Fetch-Site': 'cross-site'
+    }
+
+    const doStream = (fetchUrl, retriesLeft, redirectCount = 0) => {
+      if (redirectCount > 5) { resolve(false); return }
+      const mod = fetchUrl.startsWith('https') ? https : http
+      const req = mod.get(fetchUrl, { timeout: 35000, headers }, (res) => {
+        if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+          doStream(res.headers.location, retriesLeft, redirectCount + 1)
+          return
+        }
+        if (res.statusCode !== 200 && res.statusCode !== 206) {
+          if (retriesLeft > 0 && (res.statusCode === 429 || res.statusCode >= 500)) {
+            setTimeout(() => doStream(fetchUrl, retriesLeft - 1, redirectCount), 1000 * (maxRetries - retriesLeft + 1))
+          } else {
+            resolve(false)
+          }
+          return
+        }
+
+        const destDir = path.dirname(destPath)
+        if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true })
+
+        const tmpPath = destPath + `.tmp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+        const fileStream = fs.createWriteStream(tmpPath)
+
+        res.pipe(fileStream)
+
+        fileStream.on('finish', () => {
+          fileStream.close(() => {
+            try {
+              if (fs.existsSync(destPath)) {
+                try { fs.unlinkSync(destPath) } catch (_) {}
+              }
+              fs.renameSync(tmpPath, destPath)
+              resolve(true)
+            } catch (err) {
+              try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath) } catch (_) {}
+              resolve(false)
+            }
+          })
+        })
+
+        fileStream.on('error', () => {
+          try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath) } catch (_) {}
+          if (retriesLeft > 0) setTimeout(() => doStream(fetchUrl, retriesLeft - 1, redirectCount), 1000)
+          else resolve(false)
+        })
+
+        res.on('error', () => {
+          try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath) } catch (_) {}
+          if (retriesLeft > 0) setTimeout(() => doStream(fetchUrl, retriesLeft - 1, redirectCount), 1000)
+          else resolve(false)
+        })
+      })
+
+      req.on('error', () => {
+        if (retriesLeft > 0) setTimeout(() => doStream(fetchUrl, retriesLeft - 1, redirectCount), 1000)
+        else resolve(false)
+      })
+
+      req.on('timeout', () => {
+        req.destroy()
+        if (retriesLeft > 0) setTimeout(() => doStream(fetchUrl, retriesLeft - 1, redirectCount), 1000)
+        else resolve(false)
+      })
+    }
+
+    doStream(url, maxRetries)
+  })
+}
+
+async function downloadBatchDirectNative(username, items, options = {}) {
+  const safeUsername = sanitizeProfileName(username) || resolveProfileName(options.filename, options.filename) || 'downloads'
+  const outDir = customDownloadFolder || path.join(__dirname, '../downloads')
+  const profileDir = getOrCreateProfileDirectory(outDir, safeUsername)
+
+  const concurrency = Math.max(options.concurrency || 8, 8)
+  let downloaded = 0, failed = 0, skipped = 0, current = 0
   const total = items.length
 
-  const sendZipProgress = (phase, zipPercent) => {
+  const sendProgress = () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('ig-download-log', {
-        message: phase === 'zipping'
-          ? `📦 Gerando ZIP... ${zipPercent || 0}%`
-          : `⬇️ Baixando ${current}/${total} arquivos para ZIP...`,
+        message: `⬇️ Baixando em alta velocidade: ${current}/${total} (${downloaded} prontos, ${skipped} existentes)...`,
         type: 'info',
         timestamp: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
       })
     }
   }
 
-  const fileBuffers = []
+  sendProgress()
+
   let idx = 0
   const worker = async () => {
     while (idx < items.length) {
       const i = idx++
-      const buf = await fetchBuffer(items[i].url)
-      if (buf) { fileBuffers.push({ path: items[i].path, buffer: buf }); downloaded++ }
-      else { failed++ }
+      const item = items[i]
+      if (!item || !item.url) { failed++; current++; continue }
+
+      // Resolver caminho relativo de destino limpo
+      let itemRelPath = (item.path || path.basename(item.url)).replace(/\\/g, '/').replace(/^\/+/, '')
+      const segments = itemRelPath.split('/').filter(Boolean)
+      if (segments.length > 1 && sanitizeProfileName(segments[0])?.toLowerCase() === safeUsername.toLowerCase()) {
+        itemRelPath = segments.slice(1).join('/')
+      }
+
+      const destPath = path.join(profileDir, itemRelPath)
+      const fileName = path.basename(destPath)
+      const shortcode = extractShortcodeFromBasename(fileName)
+
+      // Verificação rápida de duplicatas: arquivo já existe ou já cadastrado
+      if (fs.existsSync(destPath)) {
+        try {
+          const stat = fs.statSync(destPath)
+          if (stat.size > 1024) {
+            if (shortcode) downloadedShortcodes.add(shortcode)
+            notifyBackendDownload(destPath, safeUsername)
+            downloaded++
+            skipped++
+            current++
+            if (current % 4 === 0 || current === total) sendProgress()
+            continue
+          }
+        } catch (_) {}
+      }
+
+      // Download direto via stream de alta velocidade
+      const ok = await downloadFileStream(item.url, destPath)
+      if (ok && fs.existsSync(destPath)) {
+        if (shortcode) downloadedShortcodes.add(shortcode)
+        notifyBackendDownload(destPath, safeUsername)
+        downloaded++
+      } else {
+        failed++
+      }
+
       current++
-      if (current % 5 === 0 || current === total) sendZipProgress('downloading')
+      if (current % 4 === 0 || current === total) sendProgress()
     }
   }
+
   const workers = []
-  for (let w = 0; w < Math.min(concurrency, items.length); w++) workers.push(worker())
+  for (let w = 0; w < Math.min(concurrency, items.length); w++) {
+    workers.push(worker())
+  }
   await Promise.all(workers)
 
-  if (downloaded === 0) return { downloaded: 0, failed, zipPath: null, error: 'Nenhum arquivo baixado para o ZIP' }
-
-  sendZipProgress('zipping', 0)
-  return new Promise((resolve, reject) => {
-    const output = fs.createWriteStream(zipPath)
-    const archive = archiver('zip', { store: true })
-
-    output.on('close', () => {
-      sendZipProgress('zipping', 100)
-      console.log(`[ZIP] Arquivo ZIP criado: ${zipPath} (${archive.pointer()} bytes)`)
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('download-status', { state: 'completed', filename: path.basename(zipPath), path: zipPath })
-        mainWindow.webContents.send('ig-download-log', {
-          message: `✅ ZIP salvo: ${path.basename(zipPath)} (${downloaded} arquivos)`,
-          type: 'success', timestamp: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-        })
-      }
-      notifyBackendDownload(zipPath)
-      resolve({ downloaded, failed, zipPath })
-    })
-    archive.on('error', (err) => { console.error('[ZIP] Erro:', err.message); reject(err) })
-    archive.pipe(output)
-    let addedCount = 0
-    for (const file of fileBuffers) {
-      archive.append(file.buffer, { name: file.path })
-      addedCount++
-      if (addedCount % 10 === 0) sendZipProgress('zipping', Math.round((addedCount / fileBuffers.length) * 90))
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (downloaded > 0) {
+      mainWindow.webContents.send('download-status', { state: 'completed', filename: `${safeUsername}_batch`, path: profileDir })
+      mainWindow.webContents.send('ig-download-log', {
+        message: `✅ Lote concluído! ${downloaded} arquivos salvos em @${safeUsername} (${skipped} existentes)`,
+        type: 'success',
+        timestamp: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      })
+    } else {
+      mainWindow.webContents.send('download-status', { state: 'failed', filename: `${safeUsername}_batch`, error: 'Nenhum arquivo baixado' })
+      mainWindow.webContents.send('ig-download-log', {
+        message: `❌ Falha ao baixar lote para @${safeUsername}`,
+        type: 'error',
+        timestamp: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      })
     }
-    archive.finalize()
-  })
+  }
+
+  return { success: downloaded > 0, downloaded, failed, skipped, zipPath: profileDir }
+}
+
+async function buildZipNative(username, items, options = {}) {
+  // Redireciona diretamente para o pipeline contínuo em disco ultra-rápido
+  return downloadBatchDirectNative(username, items, options)
 }
 
 function notifyBackendDownload(filePath, profileSource) {
@@ -432,8 +645,11 @@ function extractShortcodeFromBasename(filename) {
   const ext = path.extname(filename)
   const base = path.basename(filename, ext)
   // Pattern: YYYYMMDD_HHMM_SHORTCODE or YYYYMMDD_HHMM_SHORTCODE_INDEX
-  const match = base.match(/^\d{8}_\d{4}_([A-Za-z0-9_-]{6,})(?:_\d+)?$/)
-  if (match) return match[1]
+  const match = base.match(/^\d{8}_\d{4}_([A-Za-z0-9_-]+?)(?:_\d+)?$/)
+  if (match && match[1].length >= 6) return match[1]
+  // TikTok ID pattern: e.g. 7412345678901234567 or timestamp_7412345678901234567
+  const ttMatch = base.match(/(\d{15,22})/)
+  if (ttMatch) return ttMatch[1]
   // Fallback: last underscore segment >= 6 chars
   const lastIdx = base.lastIndexOf('_')
   if (lastIdx > 0) {
@@ -626,9 +842,42 @@ function setupExtensionDownloadInterceptor(sess) {
   })
 }
 
+async function downloadSingleFileNative(url, filename, profileName) {
+  const username = sanitizeProfileName(profileName) || resolveProfileName(filename, filename) || 'downloads'
+  const outDir = customDownloadFolder || path.join(__dirname, '../downloads')
+  const targetDir = getOrCreateProfileDirectory(outDir, username)
+  const actualFileName = path.basename(filename || 'media.mp4')
+  const numberedFileName = getNumberedVideoFileName(targetDir, actualFileName)
+  const savePath = getUniqueSavePath(targetDir, numberedFileName)
+  const displayName = path.basename(savePath)
+
+  const buf = await fetchBuffer(url)
+  if (!buf || buf.length === 0) {
+    throw new Error('Falha ao baixar buffer do arquivo')
+  }
+
+  fs.writeFileSync(savePath, buf)
+  notifyBackendDownload(savePath, username)
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('download-status', {
+      state: 'completed',
+      filename: displayName,
+      path: savePath
+    })
+    mainWindow.webContents.send('ig-download-log', {
+      message: `✅ Salvo: ${displayName} (@${username})`,
+      type: 'success',
+      timestamp: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    })
+  }
+
+  return { success: true, path: savePath, filename: displayName }
+}
+
 module.exports = {
   getMainWindow, setMainWindow, getDownloadFolder, setDownloadFolder,
-  fetchBuffer, buildZipNative, notifyBackendDownload, extractAndRenameZip,
+  fetchBuffer, downloadFileStream, downloadBatchDirectNative, buildZipNative, downloadSingleFileNative, notifyBackendDownload, extractAndRenameZip,
   setupExtensionDownloadInterceptor, loadDownloadedShortcodes,
   setPendingFilename, sanitizeProfileName, resolveProfileName,
   getOrCreateProfileDirectory, extractUsernameAndShortcode,

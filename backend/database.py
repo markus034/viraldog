@@ -57,6 +57,17 @@ Base = declarative_base()
 
 # ─── Core Models ───
 
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    password_hash = Column(String, nullable=False)
+    name = Column(String, nullable=True)
+    role = Column(String, default="user")  # "admin" or "user"
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 class Account(Base):
     __tablename__ = "accounts"
     
@@ -90,18 +101,15 @@ class Account(Base):
     connected_at = Column(DateTime, default=datetime.utcnow)
     revoked = Column(Boolean, default=False)  # True se usuário revogou permissão na Meta
     
+    # Fingerprint & Warmup Automation fields
+    fingerprint_json = Column(Text, nullable=True)  # User-Agent, resolution, canvas/webgl noise, timezone
+    warmup_config_json = Column(Text, nullable=True)  # Daily goals, hashtags, execution mode
+    last_warmup_at = Column(DateTime, nullable=True)  # Last execution timestamp
+    warmup_history_json = Column(Text, nullable=True)  # History logs of warmup runs
+    extensions_config_json = Column(Text, nullable=True)  # JSON with enabled extension IDs for this profile
+    
     # Relationships
     profile = relationship("AccountProfile", back_populates="account", uselist=False)
-
-class User(Base):
-    __tablename__ = "users"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True, nullable=False)
-    password_hash = Column(String, nullable=False)
-    name = Column(String, nullable=True)
-    is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
 
 class Post(Base):
     __tablename__ = "posts"
@@ -128,6 +136,10 @@ class Post(Base):
     # Carousel-specific
     carousel_image_paths = Column(Text, nullable=True)  # JSON array of image paths
     meta_container_id = Column(String, nullable=True)
+    # Cloud Worker (24/7 autonomous scheduling)
+    cloud_job_id = Column(String, nullable=True)
+    is_cloud_scheduled = Column(Boolean, default=False)
+
 class Config(Base):
     __tablename__ = "configs"
     
@@ -268,6 +280,11 @@ def init_db():
                 "access_token": "TEXT",
                 "connected_at": "DATETIME",
                 "revoked": "BOOLEAN DEFAULT 0",
+                "fingerprint_json": "TEXT",
+                "warmup_config_json": "TEXT",
+                "last_warmup_at": "DATETIME",
+                "warmup_history_json": "TEXT",
+                "extensions_config_json": "TEXT",
             }
             for col, col_type in new_accounts_cols.items():
                 if col not in accounts_cols:
@@ -286,7 +303,9 @@ def init_db():
                 "meta_container_id": "VARCHAR",
                 "ig_user_id": "VARCHAR",
                 "published_at": "DATETIME",
-                "owner_user_id": "VARCHAR DEFAULT 'default'"
+                "owner_user_id": "VARCHAR DEFAULT 'default'",
+                "cloud_job_id": "VARCHAR",
+                "is_cloud_scheduled": "BOOLEAN DEFAULT 0"
             }
             for col, col_type in new_posts_cols.items():
                 if col not in posts_cols:
@@ -297,6 +316,12 @@ def init_db():
             template_cols = [col[1] for col in cursor.fetchall()]
             if "extra_config" not in template_cols:
                 cursor.execute("ALTER TABLE template_library ADD COLUMN extra_config TEXT")
+
+            # Migrate users
+            cursor.execute("PRAGMA table_info(users)")
+            user_cols = [col[1] for col in cursor.fetchall()]
+            if user_cols and "role" not in user_cols:
+                cursor.execute("ALTER TABLE users ADD COLUMN role VARCHAR DEFAULT 'user'")
 
             conn.commit()
 
@@ -323,15 +348,16 @@ def init_db():
             "whisper_model_size": "base",  # tiny, base, small, medium, large
             "auto_repost_global": "false",
             "analytics_collect_interval_hours": "6",
-            "meta_app_id": "1640190021019907",
-            "meta_app_secret": "",
-            "meta_redirect_uri": "",
-            "public_media_base_url": "",
-            "s3_endpoint_url": "",
-            "s3_bucket_name": "",
-            "s3_access_key": "",
-            "s3_secret_key": "",
-            "s3_public_base_url": "",
+            "meta_app_id": "2644523229299657",
+            "meta_app_secret": "628164516a80dd995f6d42bac888956c",
+            "meta_redirect_uri": "https://www.viraldog.com.br/auth/callback",
+            "s3_endpoint_url": "https://68b3702cf2af92dc496a523077776bfa.r2.cloudflarestorage.com",
+            "s3_bucket_name": "viraldog-media",
+            "s3_access_key": "29369fccb2334b3a0e290d7c77391bc1",
+            "s3_secret_key": "7ecf56747e82442f470935e159b0268abe037ad2dd9df42b4b656e19c97938d7",
+            "s3_public_base_url": "https://pub-8e15bc4caf6b4403add0f7105755af12.r2.dev",
+            "cloud_worker_url": "",
+            "cloud_worker_secret": "viraldog-cloud-secret-2026",
             "vary_captions_ai": "false",
         }
         
@@ -362,6 +388,24 @@ def init_db():
             if not existing:
                 db.add(SchedulerJob(**job))
         
+        # Initialize default admin user if none exists
+        if db.query(User).count() == 0:
+            import hashlib
+            import secrets
+            admin_email = os.getenv("ADMIN_EMAIL", "admin@viraldog.com").strip().lower()
+            admin_pass = os.getenv("ADMIN_PASSWORD", "admin123")
+            salt = secrets.token_hex(16)
+            pw_hash = hashlib.pbkdf2_hmac('sha256', admin_pass.encode('utf-8'), salt.encode('utf-8'), 100000).hex()
+            admin_user = User(
+                email=admin_email,
+                password_hash=f"{salt}:{pw_hash}",
+                name="Administrador ViralDog",
+                role="admin",
+                is_active=True
+            )
+            db.add(admin_user)
+            print(f"init_db: Usuário Admin padrão criado ({admin_email}).")
+
         db.commit()
     except Exception as e:
         print(f"Error initializing configs: {e}")

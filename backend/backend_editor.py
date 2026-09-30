@@ -18,6 +18,47 @@ from utils import get_ffmpeg_exe
 # ponytail: Windows-only flag to hide console windows spawned by ffmpeg subprocesses.
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
 
+_HARDWARE_ENCODER_CACHED = None
+
+def get_best_video_encoder_args():
+    global _HARDWARE_ENCODER_CACHED
+    if _HARDWARE_ENCODER_CACHED is not None:
+        return list(_HARDWARE_ENCODER_CACHED)
+
+    ffmpeg_exe = get_ffmpeg_exe()
+    try:
+        # Tenta verificar se NVENC (NVIDIA GPU) está disponível
+        test_cmd = [
+            ffmpeg_exe,
+            "-hide_banner",
+            "-f", "lavfi",
+            "-i", "nullsrc=s=64x64:d=0.1",
+            "-c:v", "h264_nvenc",
+            "-f", "null",
+            "-"
+        ]
+        res = subprocess.run(test_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=_NO_WINDOW, timeout=3)
+        if res.returncode == 0:
+            _HARDWARE_ENCODER_CACHED = [
+                "-c:v", "h264_nvenc",
+                "-preset", "p4",
+                "-cq", "23",
+                "-pix_fmt", "yuv420p",
+            ]
+            return list(_HARDWARE_ENCODER_CACHED)
+    except Exception:
+        pass
+
+    # Fallback de altíssima performance para CPU: veryfast + multithreading nativo
+    _HARDWARE_ENCODER_CACHED = [
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        "-threads", "0",
+    ]
+    return list(_HARDWARE_ENCODER_CACHED)
+
 
 def resolve_font_file(font_family: str = "Arial", is_bold: bool = False) -> str:
     """
@@ -81,23 +122,52 @@ def resolve_font_file(font_family: str = "Arial", is_bold: bool = False) -> str:
     return ""
 
 
-def wrap_text_for_box(text: str, box_width_px: int, font_size_px: int) -> str:
+def wrap_text_for_box(text: str, box_width_px: int, font_size_px: int, font_path: str = "") -> str:
     if not text:
         return ""
-    # Estimate characters per line based on font size (average width is approx 0.55 of font size)
-    char_width = font_size_px * 0.55
-    max_chars = max(5, int(box_width_px / char_width))
     
-    # Process paragraph by paragraph (preserving original manual newlines)
+    pil_font = None
+    if font_path and os.path.isfile(font_path):
+        try:
+            from PIL import ImageFont
+            pil_font = ImageFont.truetype(font_path, font_size_px)
+        except Exception:
+            pil_font = None
+
     paragraphs = text.split("\n")
-    wrapped_paragraphs = []
+    wrapped_lines = []
+
     for p in paragraphs:
         if not p.strip():
-            wrapped_paragraphs.append("")
-        else:
-            wrapped_paragraphs.extend(textwrap.wrap(p, width=max_chars))
+            wrapped_lines.append("")
+            continue
+        
+        words = p.split(" ")
+        current_line = []
+        
+        for word in words:
+            if not word:
+                continue
+            test_line = " ".join(current_line + [word]) if current_line else word
+            if pil_font:
+                try:
+                    w = pil_font.getlength(test_line)
+                except AttributeError:
+                    bbox = pil_font.getbbox(test_line)
+                    w = bbox[2] - bbox[0]
+            else:
+                w = len(test_line) * (font_size_px * 0.62)
             
-    return "\n".join(wrapped_paragraphs)
+            if w <= box_width_px or not current_line:
+                current_line.append(word)
+            else:
+                wrapped_lines.append(" ".join(current_line))
+                current_line = [word]
+        
+        if current_line:
+            wrapped_lines.append(" ".join(current_line))
+            
+    return "\n".join(wrapped_lines)
 
 def get_video_info(video_path: str) -> dict:
     """
@@ -1243,8 +1313,8 @@ def compose_editor_video(
         v_src = "[v_flipped]"
 
     # Step 3: Scale cropped region to fit inside template hole
-    # Scale proportionally relative to the template hole width vs crop box width (matching frontend CSS width: 100%)
-    scale = hole_w / bbox_w if (has_template and hole_w and bbox_w) else (template_w / native_w)
+    # Scale proportionally relative to the template canvas width vs native video width (matching frontend preview: template.width / videoWidth)
+    scale = (template_w / native_w) if (native_w > 0) else 1.0
     scaled_w = int(bw * scale * video_scale)
     scaled_h = int(bh * scale * video_scale)
 
@@ -1255,27 +1325,42 @@ def compose_editor_video(
     parts.append(f"{v_src}scale={scaled_w}:{scaled_h}[v_scaled]")
     v_src = "[v_scaled]"
 
+    tw_e = template_w - (template_w % 2) or 2
+    th_e = template_h - (template_h % 2) or 2
+
     if has_template:
-        # Step 4a: Create transparent zone canvas (hole size)
-        hole_w_e = hole_w - (hole_w % 2) or 2
-        hole_h_e = hole_h - (hole_h % 2) or 2
-        parts.append(f"color=c=black@0:s={hole_w_e}x{hole_h_e}[v_zone]")
-
-        # Step 4b: Overlay scaled video onto zone canvas (top-aligned inside hole)
-        offset_x = (hole_w_e - scaled_w) // 2
+        # Step 4: Overlay scaled video onto template canvas at hole coordinates
+        # Frontend aligns: offsetLeft_rel_to_hole = (tw - cropWidthOnTemplate) / 2
+        offset_x = (hole_w - scaled_w) // 2
         offset_y = 0
-        parts.append(f"[v_zone]{v_src}overlay={offset_x}:{offset_y}:shortest=1[v_fitted]")
+        final_x = max(0, hole_x + offset_x)
+        final_y = max(0, hole_y + offset_y)
 
-        # Step 4c: Overlay the zone onto the template canvas at hole position
-        tw_e = template_w - (template_w % 2) or 2
-        th_e = template_h - (template_h % 2) or 2
+        # Detect if template PNG has transparency (alpha cutout)
+        is_transparent = False
+        try:
+            from PIL import Image
+            with Image.open(template_path) as img:
+                if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+                    extrema = img.convert("RGBA").getextrema()
+                    if extrema and len(extrema) >= 4 and extrema[3][0] < 255:
+                        is_transparent = True
+        except Exception:
+            pass
+
         parts.append(f"[{template_idx}:v]scale={tw_e}:{th_e}[v_tmpl]")
-        parts.append(f"[v_tmpl][v_fitted]overlay={hole_x}:{hole_y}:shortest=1[v_composed]")
+
+        if is_transparent:
+            # Place video underneath template canvas (shows through transparent hole)
+            parts.append(f"color=c=black:s={tw_e}x{th_e}[v_bg]")
+            parts.append(f"[v_bg]{v_src}overlay={final_x}:{final_y}:shortest=1[v_under]")
+            parts.append(f"[v_under][v_tmpl]overlay=0:0:shortest=1[v_composed]")
+        else:
+            # Opaque template: place video on top of template canvas at hole coordinates
+            parts.append(f"[v_tmpl]{v_src}overlay={final_x}:{final_y}:shortest=1[v_composed]")
         v_src = "[v_composed]"
     else:
         # No template: just place on black canvas of template size
-        tw_e = template_w - (template_w % 2) or 2
-        th_e = template_h - (template_h % 2) or 2
         parts.append(f"color=c=black:s={tw_e}x{th_e}[v_bg]")
         offset_x = (tw_e - scaled_w) // 2
         offset_y = (th_e - scaled_h) // 2
@@ -1297,7 +1382,7 @@ def compose_editor_video(
 
         # Convert web hex color to FFmpeg format
         def hex_to_ff(h: str) -> str:
-            h = h.lstrip("#")
+            h = (h or "").lstrip("#")
             if len(h) == 6:
                 return f"0x{h}"
             return "white"
@@ -1308,12 +1393,12 @@ def compose_editor_video(
         scale_factor = template_w / 308.5714
         font_size = max(4, int(round(text_size * scale_factor)))
         
-        box_width = int(text_width_pct / 100.0 * template_w)
-        wrapped_text = wrap_text_for_box(text_content, box_width, font_size)
-        escaped = escape_drawtext_text(wrapped_text)
-        
         # Resolve font file path (always use valid TTF file to ensure FFmpeg renders high-res vector text)
         font_path = resolve_font_file(text_font_family, text_bold)
+        
+        box_width = int(text_width_pct / 100.0 * template_w)
+        wrapped_text = wrap_text_for_box(text_content, box_width, font_size, font_path)
+        escaped = escape_drawtext_text(wrapped_text)
         
         escaped_font_path = font_path.replace("\\", "/").replace(":", "\\:") if font_path else ""
         font_style_str = f"fontfile='{escaped_font_path}'" if escaped_font_path else ""
@@ -1353,7 +1438,7 @@ def compose_editor_video(
         else:
             x_expr = f"{tx}-tw/2"
 
-        scaled_line_spacing = int(round(text_line_spacing * scale_factor))
+        scaled_line_spacing = int(round((text_line_spacing * 0.5) * scale_factor))
         line_spacing_str = f":line_spacing={scaled_line_spacing}"
 
         draw = (
@@ -1410,11 +1495,8 @@ def compose_editor_video(
     out_dir = os.path.dirname(output_path)
     out_filename = os.path.basename(output_path)
 
+    cmd.extend(get_best_video_encoder_args())
     cmd.extend([
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "23",
-        "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-b:a", "128k",
         "-movflags", "+faststart",
