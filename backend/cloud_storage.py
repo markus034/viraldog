@@ -83,6 +83,63 @@ def is_storage_configured(db: Optional[Session] = None) -> bool:
     return bool(endpoint_url and bucket and access_key and secret_key)
 
 
+def ensure_cover_jpeg(image_path: str) -> Tuple[str, bool]:
+    """
+    Garante que a imagem de capa esteja no formato JPEG (.jpg) exigido pela Meta Graph API.
+    Converte PNG, WebP e outros formatos para JPEG RGB.
+    Retorna: (caminho_do_arquivo_jpeg, eh_arquivo_temporario)
+    """
+    if not image_path or not os.path.exists(image_path):
+        raise FileNotFoundError(f"Arquivo de capa não encontrado: {image_path}")
+
+    ext = os.path.splitext(image_path)[1].lower()
+    needs_conversion = ext not in ['.jpg', '.jpeg']
+
+    if not needs_conversion:
+        try:
+            from PIL import Image
+            with Image.open(image_path) as img:
+                if img.format != 'JPEG' or img.mode != 'RGB':
+                    needs_conversion = True
+        except Exception:
+            pass
+
+    if not needs_conversion:
+        return image_path, False
+
+    try:
+        from PIL import Image
+        temp_dir = os.path.join(APP_DATA_DIR, "temp_covers")
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_jpeg = os.path.join(temp_dir, f"cover_{uuid.uuid4().hex[:8]}.jpg")
+
+        with Image.open(image_path) as img:
+            rgb_img = img.convert('RGB')
+            rgb_img.save(temp_jpeg, format='JPEG', quality=95)
+
+        print(f"[CloudStorage] Capa convertida com sucesso para JPEG RGB: {temp_jpeg}")
+        return temp_jpeg, True
+    except Exception as e:
+        print(f"[CloudStorage] Aviso: conversão para JPEG falhou ({e}). Tentando usar original.")
+        return image_path, False
+
+
+def upload_cover_for_meta(cover_path: str, db: Optional[Session] = None) -> Tuple[str, Optional[str]]:
+    """
+    Prepara (garante JPEG) e envia imagem de capa para o Cloud Storage da Meta.
+    Retorna: (public_url, s3_object_key)
+    """
+    jpeg_path, is_temp = ensure_cover_jpeg(cover_path)
+    try:
+        return upload_media_for_meta(jpeg_path, db=db)
+    finally:
+        if is_temp and os.path.exists(jpeg_path):
+            try:
+                os.remove(jpeg_path)
+            except Exception:
+                pass
+
+
 def upload_media_for_meta(file_path: str, db: Optional[Session] = None) -> Tuple[str, Optional[str]]:
     """
     Uploads a local media file to Cloud Storage (S3/R2) or local public uploads folder.

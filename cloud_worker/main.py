@@ -52,12 +52,27 @@ class ScheduledJob(Base):
     ig_media_id = Column(String, nullable=True)
     error_message = Column(Text, nullable=True)
     cleanup_s3_key = Column(String, nullable=True)
+    cover_url = Column(Text, nullable=True)
+    cleanup_cover_s3_key = Column(String, nullable=True)
     s3_config_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     published_at = Column(DateTime, nullable=True)
 
 
 Base.metadata.create_all(bind=engine)
+
+# Migração suave para garantir colunas em bancos SQLite/Postgres existentes
+try:
+    with engine.connect() as conn:
+        from sqlalchemy import text
+        for col, col_type in [("cover_url", "TEXT"), ("cleanup_cover_s3_key", "VARCHAR")]:
+            try:
+                conn.execute(text(f"ALTER TABLE scheduled_jobs ADD COLUMN {col} {col_type}"))
+                conn.commit()
+            except Exception:
+                pass
+except Exception:
+    pass
 
 
 # FastAPI App
@@ -107,6 +122,8 @@ class CreateJobRequest(BaseModel):
     caption: Optional[str] = ""
     scheduled_time: str  # ISO string UTC
     cleanup_s3_key: Optional[str] = None
+    cover_url: Optional[str] = None
+    cleanup_cover_s3_key: Optional[str] = None
     s3_config: Optional[Dict[str, Any]] = None
 
 
@@ -211,6 +228,10 @@ def execute_meta_publish(job: ScheduledJob) -> str:
             "share_to_feed": "true",
             "access_token": access_token,
         }
+        if getattr(job, "cover_url", None):
+            payload["cover_url"] = job.cover_url
+            print(f"[CloudWorker] Capa personalizada anexada ao Reels: {job.cover_url}")
+
         res = requests.post(base_url, data=payload, timeout=35)
         if res.status_code != 200:
             raise Exception(f"Erro ao criar container de Reels: {res.text}")
@@ -283,10 +304,13 @@ def background_scheduler_loop():
                         print(f"[CloudWorker] ✅ Job #{job.id} publicado com sucesso! Instagram Media ID: {media_id}")
 
                         # Cleanup opcional de S3
-                        if job.cleanup_s3_key and job.s3_config_json:
+                        if job.s3_config_json:
                             try:
                                 s3_cfg = json.loads(job.s3_config_json)
-                                cleanup_s3_file(job.cleanup_s3_key, s3_cfg)
+                                if job.cleanup_s3_key:
+                                    cleanup_s3_file(job.cleanup_s3_key, s3_cfg)
+                                if getattr(job, "cleanup_cover_s3_key", None):
+                                    cleanup_s3_file(job.cleanup_cover_s3_key, s3_cfg)
                             except Exception as c_err:
                                 print(f"[CloudWorker] Falha ao limpar S3: {c_err}")
 
@@ -362,6 +386,8 @@ def create_or_update_job(
             existing_job.caption = req.caption
             existing_job.scheduled_time = dt_utc
             existing_job.cleanup_s3_key = req.cleanup_s3_key
+            existing_job.cover_url = req.cover_url
+            existing_job.cleanup_cover_s3_key = req.cleanup_cover_s3_key
             existing_job.s3_config_json = s3_json
             existing_job.status = "pending"
             db.commit()
@@ -383,6 +409,8 @@ def create_or_update_job(
             caption=req.caption,
             scheduled_time=dt_utc,
             cleanup_s3_key=req.cleanup_s3_key,
+            cover_url=req.cover_url,
+            cleanup_cover_s3_key=req.cleanup_cover_s3_key,
             s3_config_json=s3_json,
             status="pending"
         )

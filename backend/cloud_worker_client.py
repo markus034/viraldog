@@ -118,6 +118,19 @@ def schedule_job_to_cloud(
         else:
             media_url, cleanup_key = cloud_storage.upload_media_for_meta(post.video_path, db=db)
 
+        # Upload de Capa customizada de Reels para o S3 se existir (garantindo JPEG)
+        cover_url = None
+        cover_cleanup_key = None
+        if post.cover_image_path and os.path.isfile(post.cover_image_path):
+            try:
+                c_url, c_key = cloud_storage.upload_cover_for_meta(post.cover_image_path, db=db)
+                if c_url:
+                    cover_url = c_url
+                    cover_cleanup_key = c_key
+                    print(f"[Cloud Worker] Capa customizada enviada para S3/R2: {c_url}")
+            except Exception as cov_err:
+                print(f"[Cloud Worker] Falha ao enviar capa personalizada para S3: {cov_err}")
+
         # Montar configuração do S3 para permitir cleanup após publicação
         s3_cfg = {
             "s3_endpoint_url": _get_cfg(db, "s3_endpoint_url"),
@@ -144,6 +157,8 @@ def schedule_job_to_cloud(
             "caption": post.caption or "",
             "scheduled_time": sched_time_iso,
             "cleanup_s3_key": cleanup_key,
+            "cover_url": cover_url,
+            "cleanup_cover_s3_key": cover_cleanup_key,
             "s3_config": s3_cfg
         }
 

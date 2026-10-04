@@ -61,7 +61,7 @@ def extract_video_thumbnail(video_path: str) -> str:
 
 # ─── Instagrapi Publishing ───
 
-def publish_via_instagrapi(video_path: str, caption: str, cookies_json: str, proxy_url: str = None) -> str:
+def publish_via_instagrapi(video_path: str, caption: str, cookies_json: str, proxy_url: str = None, cover_image_path: str = None) -> str:
     """
     Publishes a local video to Reels using the user's cookies/session (instagrapi).
     """
@@ -96,8 +96,16 @@ def publish_via_instagrapi(video_path: str, caption: str, cookies_json: str, pro
             raise Exception("Sessão do Instagram expirou ou requer verificação de segurança. Atualize o login na aba Perfis.")
         raise Exception(f"Falha ao autenticar cookies do Instagram: {e}")
         
+    temp_thumb = None
     try:
-        thumb_path = extract_video_thumbnail(video_path)
+        if cover_image_path and os.path.exists(cover_image_path):
+            import cloud_storage
+            thumb_path, is_temp = cloud_storage.ensure_cover_jpeg(cover_image_path)
+            if is_temp:
+                temp_thumb = thumb_path
+        else:
+            thumb_path = extract_video_thumbnail(video_path)
+
         if thumb_path and os.path.exists(thumb_path):
             media = cl.clip_upload(video_path, caption, thumbnail=thumb_path)
         else:
@@ -108,6 +116,12 @@ def publish_via_instagrapi(video_path: str, caption: str, cookies_json: str, pro
         if "429" in err_str or "too many" in err_str.lower():
             raise Exception("Instagram bloqueou o upload por excesso de requisições (Rate Limit 429). Aguarde alguns minutos.")
         raise Exception(f"Erro ao subir Reels via automação local: {e}")
+    finally:
+        if temp_thumb and os.path.exists(temp_thumb):
+            try:
+                os.remove(temp_thumb)
+            except Exception:
+                pass
 
 
 
@@ -253,7 +267,7 @@ def check_24h_post_limit(db: Session, ig_user_id: str = None, account_username: 
 
 def publish_via_official_api(video_path: str, caption: str, access_token: str, ig_user_id: str,
                              post_type: str = "reel", carousel_images: list = None,
-                             db: Session = None) -> str:
+                             db: Session = None, cover_image_path: str = None) -> str:
     """
     Publishes content via official Meta Instagram Graph API v22.0.
     Uploads local media to Cloud Storage (S3/R2) or public server, creates container,
@@ -339,6 +353,18 @@ def publish_via_official_api(video_path: str, caption: str, access_token: str, i
                 "share_to_feed": "true",
                 "access_token": access_token,
             }
+
+            if cover_image_path and os.path.isfile(cover_image_path):
+                try:
+                    cover_url, cover_key = cloud_storage.upload_cover_for_meta(cover_image_path, db=db)
+                    if cover_key:
+                        uploaded_keys_to_clean.append(cover_key)
+                    if cover_url:
+                        payload["cover_url"] = cover_url
+                        print(f"[Meta API] Capa customizada anexada ao Reels: {cover_url}")
+                except Exception as c_err:
+                    print(f"[Meta API] Aviso ao enviar capa personalizada para Cloud Storage: {c_err}")
+
             res = requests.post(base_url, data=payload, timeout=30)
             if res.status_code != 200:
                 raise Exception(f"Erro ao criar container de Reels na Meta API: {res.text}")
@@ -398,7 +424,8 @@ def publish_via_official_api(video_path: str, caption: str, access_token: str, i
 
 def publish_post(video_path: str, caption: str, cookies_json: str, db: Session,
                  account_username: str = None, post_type: str = "reel",
-                 carousel_images: list = None, cross_targets: list = None) -> str:
+                 carousel_images: list = None, cross_targets: list = None,
+                 cover_image_path: str = None) -> str:
     """
     Unified publishing entrypoint.
     Automatically determines whether to publish via official Meta Graph API or instagrapi cookies.
@@ -438,7 +465,8 @@ def publish_post(video_path: str, caption: str, cookies_json: str, db: Session,
             ig_user_id=ig_user_id,
             post_type=post_type or "reel",
             carousel_images=carousel_images,
-            db=db
+            db=db,
+            cover_image_path=cover_image_path,
         )
         return media_id
 
@@ -449,5 +477,5 @@ def publish_post(video_path: str, caption: str, cookies_json: str, db: Session,
         if not cookies_json and acc.session_cookies:
             cookies_json = acc.session_cookies
 
-    media_id = publish_via_instagrapi(video_path, caption, cookies_json, proxy_url)
+    media_id = publish_via_instagrapi(video_path, caption, cookies_json, proxy_url, cover_image_path=cover_image_path)
     return media_id
