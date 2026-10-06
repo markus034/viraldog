@@ -154,6 +154,7 @@ def schedule_job_to_cloud(
             "media_url": media_url,
             "carousel_urls": carousel_urls if carousel_urls else None,
             "post_type": post.post_type or "reel",
+            "story_link": getattr(post, "story_link", None),
             "caption": post.caption or "",
             "scheduled_time": sched_time_iso,
             "cleanup_s3_key": cleanup_key,
@@ -227,11 +228,13 @@ def sync_cloud_jobs(db: Session, post_ids: Optional[List[int]] = None) -> Dict[s
         data = res.json()
         jobs = data.get("jobs", [])
         updated_count = 0
+        found_local_ids = set()
 
         for job in jobs:
             local_id = job.get("local_post_id")
             if not local_id:
                 continue
+            found_local_ids.add(local_id)
 
             local_post = db.query(Post).filter(Post.id == local_id).first()
             if not local_post:
@@ -258,6 +261,24 @@ def sync_cloud_jobs(db: Session, post_ids: Optional[List[int]] = None) -> Dict[s
                     local_post.error_message = job.get("error_message") or "Erro desconhecido na publicação em nuvem."
                     updated_count += 1
 
+        # Reconciliação: se algum post futuro pendente com is_cloud_scheduled=True não foi retornado pelo Cloud Worker
+        # (por exemplo, após reinício de container efêmero no Render/servidor sem persistência), reenviar automaticamente.
+        now_utc = datetime.utcnow()
+        missing_ids = [pid for pid in target_ids if pid not in found_local_ids]
+        for m_id in missing_ids:
+            p = db.query(Post).filter(Post.id == m_id).first()
+            if p and p.status == "pending" and p.scheduled_time and p.scheduled_time > now_utc:
+                acc = db.query(Account).filter(Account.username == p.account_username).first()
+                if acc:
+                    try:
+                        print(f"[CloudWorkerSync] Reenviando post futuro #{p.id} perdido para o Cloud Worker...")
+                        re_ok, re_jid, re_err = schedule_job_to_cloud(p, acc, db)
+                        if re_ok and re_jid:
+                            p.cloud_job_id = re_jid
+                            print(f"[CloudWorkerSync] Post #{p.id} restaurado com sucesso na nuvem (Job #{re_jid}).")
+                    except Exception as re_ex:
+                        print(f"[CloudWorkerSync] Falha ao auto-restaurar post #{p.id} na nuvem: {re_ex}")
+
         db.commit()
         return {
             "synced": updated_count,
@@ -266,3 +287,27 @@ def sync_cloud_jobs(db: Session, post_ids: Optional[List[int]] = None) -> Dict[s
         }
     except Exception as e:
         return {"synced": 0, "status": "error", "message": str(e)}
+
+
+def cancel_cloud_job(job_id: str, db: Session) -> bool:
+    """Cancels a job in the 24/7 Cloud Worker if present."""
+    if not job_id:
+        return False
+    worker_url = _get_cfg(db, "cloud_worker_url")
+    worker_secret = _get_cfg(db, "cloud_worker_secret")
+    if not worker_url or not worker_secret:
+        return False
+    norm_url = worker_url.strip().rstrip("/")
+    if not norm_url.startswith("http://") and not norm_url.startswith("https://"):
+        norm_url = f"https://{norm_url}"
+    try:
+        res = requests.delete(
+            f"{norm_url}/api/jobs/{job_id}",
+            headers={"X-Worker-Secret": worker_secret},
+            timeout=10
+        )
+        return res.status_code in (200, 204, 404)
+    except Exception as e:
+        print(f"[CloudWorker] Falha ao cancelar job {job_id} na nuvem: {e}")
+        return False
+

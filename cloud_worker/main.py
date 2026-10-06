@@ -54,6 +54,7 @@ class ScheduledJob(Base):
     cleanup_s3_key = Column(String, nullable=True)
     cover_url = Column(Text, nullable=True)
     cleanup_cover_s3_key = Column(String, nullable=True)
+    story_link = Column(String, nullable=True)
     s3_config_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     published_at = Column(DateTime, nullable=True)
@@ -65,7 +66,7 @@ Base.metadata.create_all(bind=engine)
 try:
     with engine.connect() as conn:
         from sqlalchemy import text
-        for col, col_type in [("cover_url", "TEXT"), ("cleanup_cover_s3_key", "VARCHAR")]:
+        for col, col_type in [("cover_url", "TEXT"), ("cleanup_cover_s3_key", "VARCHAR"), ("story_link", "VARCHAR")]:
             try:
                 conn.execute(text(f"ALTER TABLE scheduled_jobs ADD COLUMN {col} {col_type}"))
                 conn.commit()
@@ -124,6 +125,7 @@ class CreateJobRequest(BaseModel):
     cleanup_s3_key: Optional[str] = None
     cover_url: Optional[str] = None
     cleanup_cover_s3_key: Optional[str] = None
+    story_link: Optional[str] = None
     s3_config: Optional[Dict[str, Any]] = None
 
 
@@ -207,7 +209,24 @@ def execute_meta_publish(job: ScheduledJob) -> str:
             raise Exception(f"Erro ao criar container de carrossel: {res.text}")
         container_id = res.json().get("id")
 
-    # 2. Imagem Única
+    # 2. Stories
+    elif post_type == "story":
+        is_video = any(media_url.lower().split("?")[0].endswith(ext) for ext in [".mp4", ".mov", ".avi"])
+        payload = {
+            "media_type": "STORIES",
+            "access_token": access_token,
+        }
+        if is_video:
+            payload["video_url"] = media_url
+        else:
+            payload["image_url"] = media_url
+
+        res = requests.post(base_url, data=payload, timeout=35)
+        if res.status_code != 200:
+            raise Exception(f"Erro ao criar container de Story: {res.text}")
+        container_id = res.json().get("id")
+
+    # 3. Imagem Única
     elif post_type in ["image", "photo"] or any(media_url.lower().split("?")[0].endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp"]):
         payload = {
             "caption": caption,
@@ -388,6 +407,7 @@ def create_or_update_job(
             existing_job.cleanup_s3_key = req.cleanup_s3_key
             existing_job.cover_url = req.cover_url
             existing_job.cleanup_cover_s3_key = req.cleanup_cover_s3_key
+            existing_job.story_link = req.story_link
             existing_job.s3_config_json = s3_json
             existing_job.status = "pending"
             db.commit()
@@ -411,6 +431,7 @@ def create_or_update_job(
             cleanup_s3_key=req.cleanup_s3_key,
             cover_url=req.cover_url,
             cleanup_cover_s3_key=req.cleanup_cover_s3_key,
+            story_link=req.story_link,
             s3_config_json=s3_json,
             status="pending"
         )
